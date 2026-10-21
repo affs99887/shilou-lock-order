@@ -20,6 +20,23 @@ pnpm-debug.log*
 *.key
 /.tauri/
 
+# Local credentials, runtime settings, and real-session verification outputs.
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+settings.json
+settings.v2.json
+checkout.json
+cookies*.json
+**/qa-*/
+**/acceptance-*
+**/official-payment-observation-*
+
 # 编辑器与系统
 .vscode/*
 !.vscode/extensions.json
