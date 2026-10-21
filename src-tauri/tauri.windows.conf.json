@@ -1,0 +1,11 @@
+{
+  "version": "0.6.2-auto.14",
+  "bundle": {
+    "resources": ["resources/apw-checkout.exe", "resources/OpenSource/*"],
+    "targets": ["nsis"],
+    "windows": {
+      "webviewInstallMode": {"type": "downloadBootstrapper", "silent": true},
+      "nsis": {"languages": ["SimpChinese"], "displayLanguageSelector": false, "installMode": "currentUser"}
+    }
+  }
+}

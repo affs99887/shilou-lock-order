@@ -1,0 +1,180 @@
+@import "tailwindcss" source("./");
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* 主题变量。深色是这类工具的常态使用场景（长时间挂着盯库存），
+   所以两套配色都要认真配，不能只把浅色反一下了事。 */
+:root {
+  color-scheme: light;
+  --radius: 0.625rem;
+  /* 页面底色比卡片略灰：分区卡片要有一层底才「浮」得起来，纯白上叠纯白只剩一圈线。 */
+  --background: #f5f5f7;
+  --foreground: #1d1d1f;
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: #0066cc;
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: #66666d;
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: #007aff;
+  /* 状态色。有货必须一眼可见，未知必须明显区别于无货 ——
+     这两条是整个项目的意义所在，不是随手挑的配色。 */
+  --in-stock: #18733b;
+  --unknown: #a14400;
+  --out-of-stock: oklch(0.556 0 0);
+  --sidebar: #eeeef2;
+  --sidebar-hover: #e5e5eb;
+  --link: #0066cc;
+  --link-muted: #edf4ff;
+  --choice-background: #f3f8ff;
+  --choice-border: #ccdef3;
+}
+
+.dark {
+  color-scheme: dark;
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.269 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.371 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.556 0 0);
+  --in-stock: oklch(0.77 0.2 148);
+  --unknown: oklch(0.71 0.19 25);
+  --out-of-stock: oklch(0.708 0 0);
+  --sidebar: #19191c;
+  --sidebar-hover: #303035;
+  --link: #78b7ff;
+  --link-muted: #1d3048;
+  --choice-background: #18283b;
+  --choice-border: #385573;
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-in-stock: var(--in-stock);
+  --color-unknown: var(--unknown);
+  --color-out-of-stock: var(--out-of-stock);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body {
+    /* 整页不该能被拖出回弹：WebView 默认和网页一样有橡皮筋效果，触控板一划，
+       整个界面连标题带表格一起被拽下来再弹回去，一眼就露了「这是个网页」的底。
+       列表和日志各自的滚动不受影响。 */
+    overscroll-behavior: none;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif;
+    /* 桌面应用不该能选中界面文字，那是网页的行为。日志区单独放开。 */
+    user-select: none;
+  }
+}
+
+[hidden] { display: none !important; }
+.app-shell { display: grid; grid-template-columns: 212px minmax(0, 1fr); }
+.app-sidebar { position: sticky; top: 0; height: 100vh; padding: 32px 16px 20px; display: flex; flex-direction: column; background: var(--sidebar); border-right: 1px solid var(--border); }
+.brand { display: flex; gap: 10px; align-items: center; padding: 0 5px 36px; }
+.brand-symbol { display: grid; place-items: center; background: #0066cc; color: white; width: 42px; height: 42px; border-radius: 13px; box-shadow: 0 4px 12px #0066cc22; flex-shrink: 0; }
+.brand strong { font-size: 18px; letter-spacing: -.5px; }
+.brand small { display: block; font-size: 10px; margin-top: 4px; color: var(--muted-foreground); }
+.app-sidebar nav { display: grid; gap: 7px; }
+.app-sidebar nav button { display: flex; align-items: center; gap: 11px; text-align: left; padding: 13px; border-radius: 10px; color: var(--muted-foreground); font-size: 14px; font-weight: 500; }
+.app-sidebar nav button:hover { background: var(--sidebar-hover); }
+.app-sidebar nav button[aria-current="page"] { background: var(--card); color: var(--link); box-shadow: 0 2px 8px #00000006; }
+.sidebar-foot { margin-top: auto; padding: 12px 5px 0; }
+.sidebar-foot p { font-size: 10px; color: var(--muted-foreground); margin-top: 12px; }
+.app-main { min-width: 0; padding: 28px 32px; display: flex; flex-direction: column; gap: 22px; }
+.app-toolbar { min-height: 56px; }
+.eyebrow { display: block; font-size: 11px; font-weight: 500; letter-spacing: .3px; color: var(--muted-foreground); margin-bottom: 7px; }
+.intro-strip { display: flex; gap: 24px; justify-content: space-between; align-items: center; padding: 8px 0 4px; }
+.intro-strip h2 { font-size: 25px; font-weight: 650; letter-spacing: -.6px; }
+.intro-strip p { font-size: 12px; color: var(--muted-foreground); margin-top: 7px; }
+.setup-shortcuts { display: flex; gap: 8px; }
+.setup-shortcuts button { padding: 12px; border: 1px solid var(--border); background: var(--card); border-radius: 12px; display: flex; gap: 9px; align-items: center; text-align: left; }
+.setup-shortcuts button:hover { border-color: var(--link); }
+.setup-shortcuts b { font-size: 12px; color: var(--link); background: var(--link-muted); border-radius: 50%; padding: 8px; }
+.setup-shortcuts span { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.setup-shortcuts small { display: block; font-size: 10px; color: var(--muted-foreground); font-weight: 400; margin-top: 4px; }
+.checkout-panel { box-shadow: 0 3px 16px #00000003; border-color: var(--border); }
+.checkout-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.checkout-heading h2 { font-size: 17px; font-weight: 650; }
+.checkout-status-grid { display: grid; grid-template-columns: 1fr 1fr 1.2fr; margin: 19px 0; padding: 16px 0; border-block: 1px solid var(--border); }
+.checkout-status-grid > div { padding-inline: 20px; border-left: 1px solid var(--border); }
+.checkout-status-grid > div:first-child { padding-left: 0; border: 0; }
+.checkout-status-grid span { display: block; font-size: 11px; color: var(--muted-foreground); margin-bottom: 5px; }
+.checkout-status-grid strong { font-size: 14px; font-weight: 600; }
+.checkout-actions { margin-bottom: 12px; }
+.section-note { font-size: 12px; line-height: 1.7; color: var(--muted-foreground); margin-block: 10px; }
+.plan-fields h3 { font-weight: 650; font-size: 15px; }
+.plan-controls > label { flex: 1; min-width: 140px; display: grid; gap: 8px; color: var(--foreground); font-size: 12px; }
+.plan-fields input, .plan-fields select { min-height: 38px; font-size: 14px; }
+.plan-fields input[type="checkbox"] { min-height: 0; width: 18px; height: 18px; accent-color: #0066cc; flex-shrink: 0; }
+.submission-choice { padding: 18px; border: 1px solid var(--choice-border); background: var(--choice-background); border-radius: 12px; }
+.submission-choice small { display: block; color: var(--muted-foreground); margin-top: 5px; }
+.settings-panel > div:first-child, .settings-panel > button:first-child { padding: 20px; }
+.settings-panel > div:last-child { padding: 22px; gap: 20px; }
+.inventory-page { display: flex; flex-direction: column; gap: 13px; }
+.inventory-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.inventory-heading h2 { font-size: 17px; font-weight: 650; }
+.inventory-heading p, .inventory-heading > span { color: var(--muted-foreground); font-size: 12px; margin-top: 4px; }
+.inventory-stats > span { box-shadow: none; border: none; padding: 7px 12px; }
+.log-heading { margin-top: 10px; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+button:focus-visible, select:focus-visible { outline: 3px solid #007aff88; outline-offset: 3px; }
+@media (max-width: 1150px) {
+  .app-shell { grid-template-columns: 184px minmax(0, 1fr); }
+  .app-main { padding: 24px; }
+  .intro-strip { align-items: flex-start; flex-direction: column; gap: 16px; }
+  .setup-shortcuts { width: 100%; }
+  .setup-shortcuts button { flex: 1; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

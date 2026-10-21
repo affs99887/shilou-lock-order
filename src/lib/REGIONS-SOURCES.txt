@@ -1,0 +1,13 @@
+中国大陆省市区离线选项（非 Apple 地址或配送服务目录）
+Source: https://github.com/LionixQ/administrative-division-code-of-China
+Pinned commit: a08e4c87b04687b643c089730a75d89e956d99be
+Upstream file: Dist/pca-code.json (unmodified)
+Upstream stated data date: 2025-12-31
+Retrieved: 2026-10-16 Asia/Shanghai
+Upstream identifies its source as the Ministry of Civil Affairs geographical-name database.
+License: Silent Public License 1.0; see ThirdPartyNotices/regions-SPL.txt.
+Integrated only as an address selector; not sold as a separate dataset/service.
+The data is not a guarantee of current Apple options or delivery eligibility.
+Municipality city rows repeat the municipality name for three-level UI display.
+County-level cities directly under a province repeat their name in the district selector.
+No personal data is included. No runtime network request is required.

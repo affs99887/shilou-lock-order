@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "拾漏锁单·国际选购验证",
+  "version": "0.6.2-intl.2",
+  "identifier": "local.apple-pickup-watcher.auto.international",
+  "bundle": {"resources":["resources/apw-checkout-international","resources/OpenSourceInternational/*"]},
+  "app": {
+    "windows": [{"label":"main","title":"拾漏锁单 · 国际选购验证","width":1280,"height":820,"minWidth":1000,"minHeight":640}]
+  }
+}

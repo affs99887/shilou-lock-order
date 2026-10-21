@@ -1,0 +1,9 @@
+[
+  {"locale":"zh_CN","title":"中国大陆","base":"https://www.apple.com.cn","currency":"CNY","phonePrefix":"86","phonePattern":"1[0-9]{10}","postalPattern":"[0-9]{6}","required":["province","city","district","address","postal_code","id_last4"],"verified":true},
+  {"locale":"zh_HK","title":"中国香港","base":"https://www.apple.com/hk-zh","currency":"HKD","phonePrefix":"852","phonePattern":"[2-9][0-9]{7}","postalPattern":"","required":["province","district","address"],"verified":false},
+  {"locale":"zh_TW","title":"中国台湾","base":"https://www.apple.com/tw","currency":"TWD","phonePrefix":"886","phonePattern":"0[0-9]{8,9}","postalPattern":"[0-9]{3}(?:[0-9]{2,3})?","required":["city","district","address","postal_code"],"verified":false},
+  {"locale":"ja_JP","title":"日本","base":"https://www.apple.com/jp","currency":"JPY","phonePrefix":"81","phonePattern":"0[0-9]{9,10}","postalPattern":"[0-9]{3}-?[0-9]{4}","required":["province","city","address","postal_code","family_name_kana","given_name_kana"],"verified":false},
+  {"locale":"en_SG","title":"新加坡","base":"https://www.apple.com/sg","currency":"SGD","phonePrefix":"65","phonePattern":"[3689][0-9]{7}","postalPattern":"[0-9]{6}","required":["address","postal_code"],"verified":false},
+  {"locale":"en_AU","title":"澳大利亚","base":"https://www.apple.com/au","currency":"AUD","phonePrefix":"61","phonePattern":"0[0-9]{9}","postalPattern":"[0-9]{4}","required":["province","city","address","postal_code"],"verified":false},
+  {"locale":"en_MY","title":"马来西亚","base":"https://www.apple.com/my","currency":"MYR","phonePrefix":"60","phonePattern":"0[0-9]{8,10}","postalPattern":"[0-9]{5}","required":["province","city","address","postal_code"],"verified":false}
+]
