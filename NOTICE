@@ -160,6 +160,19 @@ GNU General Public License version 3 授权发布。
 第三方组件
 --------------------------------------------------------------------------------
 
+省市区地址选项数据：
+
+    src/lib/regions-2025.json
+    Source: LionixQ/administrative-division-code-of-China
+    Commit: a08e4c87b04687b643c089730a75d89e956d99be
+    Copyright 2026 Silent Studio / FHZDCJ.
+    License: Silent Public License (SPL) 1.0
+
+该数据保留独立的 SPL 1.0 许可，不改授为本项目的 GPL。SPL 第 3 条允许将其
+作为大型系统中的地址选择器集成；数据本身及其直接衍生品仍受 SPL 的独立销售、
+重新授权等限制。完整条款见 src/lib/third-party/regions-SPL.txt；来源和用途说明
+见 src/lib/REGIONS-SOURCES.txt。该数据不属于 Apple 库存或配送资格服务。
+
 本项目在构建或运行时使用以下第三方组件，它们各自的许可条款独立于本项目。
 下表列出主要依赖；完整清单与各自许可的准确取值，以 `cargo metadata` 与
 `pnpm licenses list` 的输出为准。

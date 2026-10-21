@@ -5,7 +5,8 @@ Upstream file: Dist/pca-code.json (unmodified)
 Upstream stated data date: 2025-12-31
 Retrieved: 2026-10-16 Asia/Shanghai
 Upstream identifies its source as the Ministry of Civil Affairs geographical-name database.
-License: Silent Public License 1.0; see ThirdPartyNotices/regions-SPL.txt.
+License: Silent Public License 1.0; see src/lib/third-party/regions-SPL.txt.
+This dataset retains SPL 1.0 and is not relicensed under the application's GPL.
 Integrated only as an address selector; not sold as a separate dataset/service.
 The data is not a guarantee of current Apple options or delivery eligibility.
 Municipality city rows repeat the municipality name for three-level UI display.

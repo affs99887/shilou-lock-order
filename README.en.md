@@ -14,4 +14,6 @@ Inventory comes directly from Apple's regional `/shop/retail/pickup-message` end
 
 [GPL-3.0-or-later](LICENSE) · [Copyright and third-party notices](NOTICE)
 
+The third-party administrative-division dataset retains its separate SPL 1.0 license; see NOTICE for its scope and terms.
+
 Not affiliated with, authorized by or endorsed by Apple Inc.

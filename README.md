@@ -65,4 +65,6 @@ cargo test --locked -p apw-core --test watcher --test apple_client
 
 [GPL-3.0-or-later](LICENSE) · [版权与第三方声明](NOTICE)
 
+第三方省市区数据保留独立的 SPL 1.0 许可，适用范围及原文见上述声明。
+
 本项目与 Apple Inc. 无关联，未获其授权或认可。最终库存与取货信息以 Apple 官网为准。
