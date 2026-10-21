@@ -11,7 +11,7 @@
 use std::sync::RwLock;
 use std::time::Duration;
 
-use apw_core::apple::{AppleClient, Budget, ClientConfig};
+use apw_core::apple::{AppleClient, ClientConfig};
 use apw_core::catalog::Catalog;
 use apw_core::config::{Settings, SettingsStore};
 use apw_core::model::{Category, Product, REGIONS, Store, Target, region_by_locale};
@@ -724,11 +724,6 @@ pub fn run() {
 
             let client = AppleClient::new(ClientConfig {
                 proxies: settings.proxies.clone(),
-                // 与五秒轮询匹配，避免初始额度用完后又退回每分钟一次。
-                budget: Budget {
-                    refill_every: Duration::from_secs(monitor_policy::INTERVAL_SECONDS),
-                    ..Budget::default()
-                },
                 ..ClientConfig::default()
             })
             .map_err(|e| format!("构造 Apple 客户端失败：{e}"))?;

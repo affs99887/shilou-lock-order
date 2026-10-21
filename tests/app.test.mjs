@@ -115,51 +115,65 @@ test("only in-stock rows offer manual purchase and disable it while checkout is 
   assert.equal(app.all(e=>e.type==="Button" && e.props.children==="立即选购").length,0);
 });
 
-test("blocked monitoring uses calm presentation without rewriting unknown stock or query records", () => {
+test("blocked monitoring exposes the error and cooldown without pretending to query", () => {
   const app = renderApp();
-  app.state.trouble = { reason: "查询失败：HTTP 541", advice: "try_another_network" };
+  const detail = "HTTP 541；直连已进入冷却，5 分钟后自动重试一次";
+  app.state.trouble = { reason: `查询失败：${detail}`, advice: "try_another_network" };
   app.state.logs = ["[12:30:00] 告警：查询失败：HTTP 541"];
   app.state.rows = [{
     target: { locale: "zh_CN", storeNumber: "R575", storeTitle: "Apple 武汉",
       partNumber: "TEST", productName: "演练型号 256GB 白色" },
-    availability: { kind: "unknown", reason: "blocked", detail: "HTTP 541" },
+    availability: { kind: "unknown", reason: "blocked", detail },
     lastCheckedMs: 1729200000000,
   }];
   assert.equal(app.control(e => e.props?.["data-testid"] === "monitor-protection").role, "status");
-  assert.equal(app.all(e => e.props?.children === "调度保护已启用").length, 1);
-  assert.equal(app.all(e => e.props?.children === "查询失败：HTTP 541").length, 0);
+  assert.equal(app.all(e => e.props?.children === "库存查询受阻").length, 1);
+  assert.equal(app.all(e => e.props?.children === app.state.trouble.reason).length, 1);
   assert.equal(app.all(e => e.props?.line === app.state.logs[0]).length, 1);
   const badge = app.all(e => typeof e.type === "function" && e.type.name === "StatusBadge")[0];
   const rendered = badge.type(badge.props);
-  assert.equal(rendered.props.children[1].props.children, "正在查询，获取结果后将自动更新。");
-  assert.equal(rendered.props.children[0].props.children.props.children.props.children, "正在查询");
-  assert.equal(app.all(e => e.props?.label === "查不到").length, 0);
+  assert.equal(rendered.props.children[1].props.children, `请求被 Apple 拦截：${detail}`);
+  assert.equal(rendered.props.children[0].props.children.props.children.props.children, "未知");
+  assert.equal(app.control(e => e.props?.label === "查询异常").value, 1);
   assert.equal(app.state.rows[0].availability.kind, "unknown");
   app.state.trouble = null;
   assert.equal(app.all(e => e.props?.["data-testid"] === "monitor-protection").length, 0);
 });
 
-test("all unresolved inventory states display querying without changing the underlying result", () => {
+test("pending and failed inventory remain distinguishable with their actual reasons", () => {
   const app = renderApp();
-  for (const reason of ["not_yet_checked", "blocked", "rate_limited", "transport", "schema_drift", "apple_error"]) {
+  const cases = [
+    [{ reason: "not_yet_checked" }, "尚未轮到这一项"],
+    [{ reason: "blocked", detail: "HTTP 403" }, "请求被 Apple 拦截：HTTP 403"],
+    [{ reason: "rate_limited" }, "Apple 接口限流或暂时不可用，程序会延长间隔后重试。具体原因见查询日志。"],
+    [{ reason: "transport", detail: "连接超时" }, "网络请求失败：连接超时"],
+    [{ reason: "schema_drift", field: "pickupDisplay", raw: "changed" }, "接口返回结构与预期不符：pickupDisplay = changed"],
+    [{ reason: "apple_error", message: "服务不可用" }, "Apple 返回错误：服务不可用"],
+  ];
+  for (const [reason, detail] of cases) {
     app.state.rows = [{
       target: { locale: "zh_CN", storeNumber: "R575", storeTitle: "Apple 武汉",
         partNumber: "TEST", productName: "演练型号" },
-      availability: { kind: "unknown", reason, detail: "fixture" }, lastCheckedMs: null,
+      availability: { kind: "unknown", ...reason }, lastCheckedMs: null,
     }];
     const node = app.all(e => typeof e.type === "function" && e.type.name === "StatusBadge")[0];
-    const badge = node.type(node.props).props.children[0].props.children.props.children;
-    assert.equal(badge.props.children, "正在查询");
-    assert.ok(badge.props.className.includes("border-dashed"));
+    const rendered = node.type(node.props);
+    const badge = rendered.props.children[0].props.children.props.children;
+    const pending = reason.reason === "not_yet_checked";
+    assert.equal(badge.props.children, pending ? "待查询" : "未知");
+    assert.equal(badge.props.className.includes("border-dashed"), pending);
+    assert.equal(badge.props.className.includes("text-unknown"), !pending);
+    assert.equal(rendered.props.children[1].props.children, detail);
+    assert.equal(app.all(e => e.props?.label === "查询异常").length, pending ? 0 : 1);
     assert.equal(app.state.rows[0].availability.kind, "unknown");
   }
 });
 
-test("minute edition hides scan timing and last check while keeping scheduling status", () => {
+test("budget pacing is identified separately from query failures", () => {
   const app = renderApp();
   app.state.running = true;
   app.state.pacing = { paced: true, nextCheckInSecs: 137 };
-  assert.equal(app.all(e => e.type === "span" && e.props.children === "查询调度等待").length, 1);
+  assert.equal(app.all(e => e.type === "span" && e.props.children === "查询预算等待").length, 1);
   const children = app.all(e => e.props?.children !== undefined)
     .flatMap(e => [e.props.children].flat()).filter(v => typeof v === "string" || typeof v === "number");
   assert.ok(!children.includes(137));
@@ -358,4 +372,3 @@ test("the add button stays disabled until at least one store is selected", () =>
   app.choice("选择自提门店").onChange(["R532"]);
   assert.equal(app.addButton().disabled, false);
 });
-

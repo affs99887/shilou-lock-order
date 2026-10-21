@@ -218,6 +218,42 @@ fn count_in_stock(events: &[Event]) -> usize {
 }
 
 #[tokio::test]
+async fn 限流与服务异常保留状态码并继续退避() {
+    for code in [429, 503] {
+        let fake =
+            FakeFetcher::new(move |_, _, _| Err(ApiError::RateLimited(format!("HTTP {code}"))));
+        let (w, mut rx) = Watcher::spawn(
+            fake,
+            WatcherConfig {
+                interval: Duration::from_secs(60),
+                ..fast_config()
+            },
+        );
+        w.set_targets(vec![target("R359", "TEST")]).await;
+        w.start().await;
+        let events = wait_cycle(&mut rx).await;
+        w.stop().await;
+        assert!(events.iter().any(|event| matches!(
+            event, Event::Trouble { reason, advice: None }
+                if reason.contains(&format!("HTTP {code}")) && reason.contains("退避")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::CycleComplete {
+                healthy: false,
+                next_check_in_secs: 120,
+                ..
+            }
+        )));
+        assert!(matches!(
+            w.snapshot().await[0].availability,
+            Availability::Unknown(UnknownReason::RateLimited)
+        ));
+        assert_eq!(count_in_stock(&events), 0);
+    }
+}
+
+#[tokio::test]
 async fn 搭档表带随请求一起发但不占状态行() {
     // Apple Watch 的表壳单独查不出真话，必须和同页一条表带一起发；但那条表带
     // 不是用户盯的东西：它不能出现在状态列表里，响应里缺了它也不算故障。

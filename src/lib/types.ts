@@ -189,13 +189,13 @@ function describeUnknown(a: { kind: "unknown" } & UnknownReason): {
       return {
         label: "未知",
         tone: "unknown",
-        detail: "调度保护已启用，稍后继续查询。",
+        detail: `请求被 Apple 拦截：${a.detail}`,
       };
     case "rate_limited":
       return {
         label: "未知",
         tone: "unknown",
-        detail: "调度保护已启用，稍后继续查询。",
+        detail: "Apple 接口限流或暂时不可用，程序会延长间隔后重试。具体原因见查询日志。",
       };
     case "schema_drift":
       return {

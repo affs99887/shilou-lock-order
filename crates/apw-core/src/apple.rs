@@ -346,7 +346,7 @@ impl BlockTracker {
         };
         if now < state.until {
             return Err(ApiError::Blocked(format!(
-                "HTTP 541 后冷却中，{}后自动重试",
+                "请求被拦截后冷却中，{}后自动重试",
                 human_duration(state.until - now)
             )));
         }
@@ -2028,6 +2028,21 @@ mod tests {
     use super::*;
 
     const LOCALE: &str = "zh_HK";
+
+    #[test]
+    fn 冷却提示不虚构原始状态码() {
+        let mut tracker = BlockTracker::default();
+        let now = Instant::now();
+        tracker.record(LOCALE, now, false);
+        let message = tracker
+            .admit(LOCALE, now + Duration::from_secs(60))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("冷却中"));
+        assert!(message.contains("后自动重试"));
+        // HTTP 403 和非 JSON 响应也会进入冷却，不能统一写成 HTTP 541。
+        assert!(!message.contains("HTTP"));
+    }
 
     #[test]
     fn 同一轮并发被拦只算一次不升档() {

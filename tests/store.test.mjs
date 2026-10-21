@@ -19,6 +19,7 @@ function catalog(locale, revision = "initial") {
 function setup() {
   const calls = [];
   const handlers = {};
+  const events = new Map();
   const store = loadSource("src/lib/store.ts", (specifier) => {
     if (specifier === "@tauri-apps/api/core") return {
       invoke: async (command, args) => {
@@ -30,10 +31,72 @@ function setup() {
         throw new Error(`Unexpected command: ${command}`);
       },
     };
-    if (specifier === "@tauri-apps/api/event") return {};
+    if (specifier === "@tauri-apps/api/event") return {
+      listen: async (channel, callback) => {
+        events.set(channel, callback);
+        return () => events.delete(channel);
+      },
+    };
   });
-  return { ...store, snapshot: store.watcherStore.getSnapshot, calls, handlers };
+  return { ...store, snapshot: store.watcherStore.getSnapshot, calls, handlers,
+    emit: payload => events.get("watcher://event")({ payload }) };
 }
+
+async function monitoringApp() {
+  const app = setup();
+  Object.assign(app.handlers, {
+    list_regions: () => [], list_categories: () => [], get_snapshot: () => [],
+    get_settings: () => app.snapshot().settings, is_running: () => false,
+    check_for_update: () => null,
+  });
+  await app.connect();
+  return app;
+}
+
+test("blocked events preserve the cause, cooldown and unknown stock until a healthy cycle", async () => {
+  const app = await monitoringApp();
+  const detail = "HTTP 541；直连已进入冷却，5 分钟后自动重试一次";
+  const trouble = { reason: `查询失败：${detail}`, advice: "try_another_network" };
+  const row = { target: { storeTitle: "示例门店", productName: "示例型号" },
+    availability: { kind: "unknown", reason: "blocked", detail } };
+  app.emit({ type: "trouble", ...trouble });
+  app.emit({ type: "stateChanged", state: row });
+  app.emit({ type: "cycleComplete", healthy: false, snapshot: [row], nextCheckInSecs: 10, paced: false });
+  assert.deepEqual(app.snapshot().trouble, trouble);
+  assert.deepEqual(app.snapshot().rows, [row]);
+  assert.ok(app.snapshot().logs.some(line => line.includes(trouble.reason)));
+  assert.ok(app.snapshot().logs.some(line => line.includes(`示例门店 示例型号：请求被 Apple 拦截：${detail}`)));
+  assert.ok(!app.snapshot().logs.join("").includes("调度保护"));
+  const recovered = { ...row, availability: { kind: "out_of_stock" } };
+  app.emit({ type: "cycleComplete", healthy: true, snapshot: [recovered], nextCheckInSecs: 5, paced: false });
+  assert.equal(app.snapshot().trouble, null);
+  assert.deepEqual(app.snapshot().rows, [recovered]);
+  assert.match(app.snapshot().logs.at(-1), /查询已恢复正常/);
+  app.disconnect();
+});
+
+test("temporary API errors keep their HTTP code instead of a generic protection message", async () => {
+  const app = await monitoringApp();
+  for (const code of [429, 503]) {
+    const reason = `示例门店 查询暂时不可用：HTTP ${code}，将退避后重试`;
+    app.emit({ type: "trouble", reason, advice: null });
+    assert.equal(app.snapshot().trouble.reason, reason);
+    assert.ok(app.snapshot().logs.at(-1).includes(reason));
+  }
+  app.disconnect();
+});
+
+test("budget wait logs explain the delay once without marking inventory as failed", async () => {
+  const app = await monitoringApp();
+  const event = { type: "cycleComplete", healthy: true, snapshot: [], nextCheckInSecs: 137, paced: true };
+  app.emit(event);
+  assert.match(app.snapshot().logs.at(-1), /请求预算不足.*137 秒/);
+  assert.equal(app.snapshot().trouble, null);
+  const count = app.snapshot().logs.length;
+  app.emit(event);
+  assert.equal(app.snapshot().logs.length, count);
+  app.disconnect();
+});
 
 test("single Bark save preserves targets, proxies and other settings", async () => {
  const app=setup();const prior={...app.snapshot().settings,proxies:['http://127.0.0.1:7890'],intervalSeconds:60,feishuWebhook:'https://example.test/existing',targets:[{partNumber:'TEST'}]};

@@ -85,22 +85,18 @@ const TONE_CLASS: Record<StatusTone, string> = {
 
 function StatusBadge({ availability }: { availability: Availability }) {
   const { label, tone, detail } = describeAvailability(availability);
-  const querying = availability.kind === "unknown";
-  const visibleDetail = querying
-    ? "正在查询，获取结果后将自动更新。"
-    : detail;
   const badge = (
-    <Badge variant="outline" className={`min-w-18 justify-center ${TONE_CLASS[querying ? "pending" : tone]}`}>
-      {querying ? "正在查询" : label}
+    <Badge variant="outline" className={`min-w-18 justify-center ${TONE_CLASS[tone]}`}>
+      {label}
     </Badge>
   );
-  if (!visibleDetail) return badge;
+  if (!detail) return badge;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="cursor-help">{badge}</span>
       </TooltipTrigger>
-      <TooltipContent className="max-w-90">{visibleDetail}</TooltipContent>
+      <TooltipContent className="max-w-90">{detail}</TooltipContent>
     </Tooltip>
   );
 }
@@ -396,9 +392,10 @@ export default function App() {
 
         {ui.trouble?.advice === "try_another_network" && (
           <div role="status" data-testid="monitor-protection"
-            className="bg-muted/40 grid gap-1.5 rounded-lg border px-4 py-3 text-sm">
-            <p className="font-medium">调度保护已启用</p>
-            <p className="text-muted-foreground">当前查询暂未完成，库存状态待更新。</p>
+            className="border-unknown/30 bg-unknown/5 grid gap-1.5 rounded-lg border px-4 py-3 text-sm">
+            <p className="text-unknown font-medium">库存查询受阻</p>
+            <p className="break-words">{ui.trouble.reason}</p>
+            <p className="text-muted-foreground">受影响的库存状态为未知。程序会等待冷却结束后再尝试查询。</p>
           </div>
         )}
         {ui.trouble !== null && ui.trouble.advice !== "try_another_network" && (
@@ -613,9 +610,10 @@ export default function App() {
           <Stat label="监控" value={ui.rows.length} />
           <Stat label="有货" value={summary.inStock} tone="inStock" />
           <Stat label="无货" value={summary.outOfStock} />
+          {summary.untrusted > 0 && <Stat label="查询异常" value={summary.untrusted} tone="unknown" />}
           {ui.running && ui.pacing !== null && ui.pacing.paced && (
             <span className="text-muted-foreground ml-auto text-sm">
-              查询调度等待
+              查询预算等待
             </span>
           )}
         </div>

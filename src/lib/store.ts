@@ -68,7 +68,7 @@ export interface UiState {
 const DEFAULT_SETTINGS: Settings = {
   locale: "zh_CN",
   targets: [],
-  intervalSeconds: 5,
+  intervalSeconds: 60,
   barkUrl: "",
   feishuWebhook: "",
   soundEnabled: false,
@@ -131,8 +131,7 @@ function applyEvent(event: WatcherEvent): void {
     case "stateChanged": {
       // 列表本身以 cycleComplete 带来的快照为准，不拿这条事件去增量改 ——
       // 它是可丢弃的，用它做增量会让界面和引擎慢慢对不上。
-      // 保留每条查询记录；访问限制使用统一的调度保护文案。
-      // 原始库存状态及诊断原因仍由后端保留。
+      // 保留后端的失败分类与诊断详情，避免把冷却或限流伪装成仍在查询。
       const { availability, target } = event.state;
       if (isUntrusted(availability)) {
         const { detail } = describeAvailability(availability);
@@ -159,7 +158,7 @@ function applyEvent(event: WatcherEvent): void {
       // 只在开始被拉长的那一轮记一条，之后每轮都写会把日志刷满。
       if (event.paced && !pacedBefore) {
         pushLog(
-          "请求调度保护已生效，暂缓下一轮查询。",
+          `请求预算不足，本轮安排等待约 ${event.nextCheckInSecs} 秒后继续检查。`,
         );
       }
       break;
@@ -167,7 +166,7 @@ function applyEvent(event: WatcherEvent): void {
 
     case "trouble":
       update({ trouble: { reason: event.reason, advice: event.advice } });
-      pushLog("调度保护已启用，稍后继续查询。");
+      pushLog(`查询提示：${event.reason}`);
       break;
 
     case "runStateChanged":

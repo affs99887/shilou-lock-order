@@ -518,7 +518,12 @@ fn trouble_for(err: &ApiError, label: &str) -> Option<TroubleReport> {
             reason: format!("{label} 查询失败：{err}"),
             advice: None,
         }),
-        ApiError::RateLimited(_) | ApiError::Transport(_) => None,
+        ApiError::RateLimited(detail) => Some(TroubleReport {
+            // 这一类也承载 HTTP 5xx；保留状态码，不能一概断言查询太频繁。
+            reason: format!("{label} 查询暂时不可用：{detail}，将退避后重试"),
+            advice: None,
+        }),
+        ApiError::Transport(_) => None,
     }
 }
 
