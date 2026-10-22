@@ -301,6 +301,71 @@ class RecoveryTests(unittest.TestCase):
                 b.request({'op':'offer','hits':[hit()]})
                 self.assertTrue(b.tasks.empty())
 
+def unchecked_hit():
+    """界面手动开始时发来的目标：只有门店和商品，没有任何库存结果。"""
+    h = hit()
+    h.pop('availability')
+    h.pop('lastCheckedMs')
+    return h
+
+class ManualStartTests(unittest.TestCase):
+    @patch('worker.core.normalized_profile', return_value={})
+    @patch.object(Bridge, 'acquire')
+    def test_manual_start_needs_no_stock_and_switches_stores_only_for_this_run(self, *_):
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(FakeCheckout, data=Path(d))
+            self.assertTrue(b.request({'op': 'manual', 'hit': unchecked_hit()})['busy'])
+            b.run()
+            self.assertFalse(b.error)
+            self.assertTrue(b.automatic)
+            self.assertTrue(b.status()['manualRun'])
+            self.assertEqual(b.service.preferences['store_choice'], 'same_city')
+            self.assertEqual(b.service.preferences['store_id'], hit()['target']['storeNumber'])
+            self.assertNotIn('store_choice', b.plan, '换门店只作用于这一次，不写进保存的方案')
+
+    def test_auto_submit_needs_its_own_confirmation_and_order_guard_still_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(FakeCheckout, data=Path(d))
+            b.plan['auto_submit_order'] = True
+            with self.assertRaises(ValueError):
+                b.request({'op': 'manual', 'hit': unchecked_hit()})
+            self.assertFalse(b.reserved)
+            b.request({'op': 'manual', 'hit': unchecked_hit(), 'confirmSubmission': True})
+            self.assertTrue(b.submission_confirmed)
+            self.assertEqual(b.tasks.qsize(), 1)
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(FakeCheckout, data=Path(d))
+            b.order_guard.begin()
+            with self.assertRaises(ValueError):
+                b.request({'op': 'manual', 'hit': unchecked_hit()})
+            self.assertFalse(b.reserved)
+            self.assertTrue(b.tasks.empty())
+
+    def test_manual_start_is_mainland_only_and_refuses_while_armed(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(FakeCheckout, data=Path(d))
+            h = unchecked_hit()
+            h['target']['locale'] = 'en_SG'
+            with self.assertRaises(ValueError):
+                b.request({'op': 'manual', 'hit': h})
+            b.armed = True
+            with self.assertRaises(ValueError):
+                b.request({'op': 'manual', 'hit': unchecked_hit()})
+            self.assertFalse(b.reserved)
+            self.assertTrue(b.tasks.empty())
+
+    def test_manual_sold_out_still_notifies_and_is_not_worded_as_a_rehearsal(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(data=Path(d))
+            b.automatic = True
+            b.manual_run = True
+            b.service.event('sold_out', '同城其他门店也都不可取货')
+            self.assertFalse(b.retryable_end, '手动开始没货要照常提醒，不能静默结束')
+            b.service.attention('同城其他门店也都不可取货；单次测试结束，不循环抢购')
+            self.assertIn('本次手动选购已停止', b.status()['reason'])
+            self.assertNotIn('测试', b.status()['reason'])
+            self.assertIsNotNone(b.notice)
+
 class FakeLogin(FakeCheckout):
     """提前登录：打开账号页后第一次检查就确认已登录。"""
     def __init__(self, owner, plan):

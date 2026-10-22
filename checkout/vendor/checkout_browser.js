@@ -187,7 +187,9 @@ function appleCheckout(request) {
       const wantedStore = norm(target.store).replace(/^apple/, '');
       const storeLabel = norm(raw).replace(/^apple/, '');
       const storeMatches = group === "store" && (storeIds.length && target.store_id ? storeIds.includes(target.store_id) : !!wantedStore && storeLabel === wantedStore);
-      return {ref: ref(e), label: canonical, role, group, store_matches:storeMatches, provider, installment, installment_months:installmentMonths, invoice_company:invoiceCompany, care_paid:carePaid, selected: selected(e), disabled: disabled(e)};
+      // 门店选项自带的编号（如 R683），只有唯一一个时才给出；手动开始换门店时靠它认店。
+      const storeId = group === "store" && new Set(storeIds).size === 1 ? storeIds[0] : "";
+      return {ref: ref(e), label: canonical, role, group, store_matches:storeMatches, store_id:storeId, provider, installment, installment_months:installmentMonths, invoice_company:invoiceCompany, care_paid:carePaid, selected: selected(e), disabled: disabled(e)};
     });
   // A date may be a radio group while its check-in slot is a native SELECT.
   // Keep independent pickers separate: one selected item is not proof that

@@ -1020,6 +1020,13 @@ class Service:
                 self.attempt.region_actions = {}
                 self.attempt.region_started = None
                 self.attempt.region_wait = None
+                # 本人处理时可能刷新了门店列表：之前排除的门店重新判断，门店点击次数重新计。
+                # 选门店是可以改的选择，重新计次不会造成重复加购或下单。
+                self.attempt.exhausted_stores = set()
+                self.attempt.store_none_since = None
+                for key in [k for k in self.attempt.sent if k.startswith("store:")]:
+                    del self.attempt.sent[key]
+                    self.attempt.action_times.pop(key, None)
             self.phase_since = time.monotonic()
             if self.phase == "PRELOGIN":
                 self.prelogin_confirmations = 0

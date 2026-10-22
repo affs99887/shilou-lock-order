@@ -138,6 +138,10 @@ def validate_preferences(value: dict) -> dict:
     return p
 
 
+# 门店选项文字里写着这些，就算按钮能点也不当作能取货。
+STORE_UNAVAILABLE = re.compile(r"不可取货|无法取货|暂不可|不能取货|无货|不可用|售罄")
+
+
 def resolve_pickup_preferences(plan: dict, model: str) -> dict:
     """Resolve the actual hit's model, never the saved plan's stale model.
 
@@ -252,6 +256,13 @@ class Attempt:
             district = re.search(r"市([^市]{1,12}?(?:区|县|旗))", store["address"])
             self.target["pickup_region"] = {"province":store["province"], "city":store["city"],
                                             "district":district.group(1) if district else ""}
+        # 手动开始时为 same_city：指定门店不能取货，就改选同城其他能取货的门店。
+        # 取货地区始终按指定门店填，官网列出的就是它附近的门店。其余情况只认指定门店。
+        self.store_choice = preferences.get("store_choice", "fixed")
+        self.store_city = store["city"] if store else ""
+        self.exhausted_stores = set()
+        self.store_none_since = None
+        self.store_exhaust_reason = ""
         self.created = now
         self.started = None
         self.last_progress = now
@@ -349,6 +360,98 @@ class Attempt:
         self.region_actions[key] = (count + 1, now)
         self.pending = (key, now)
         return Decision("set", key, action["ref"], key=key)
+
+    def flexible_store(self) -> bool:
+        return self.store_choice == "same_city" and self.method == "pickup" and bool(self.store_city)
+
+    @staticmethod
+    def store_of(control: dict):
+        """认出门店选项是哪家店：优先用选项自带的门店编号，没有编号时要求文字与店名完全一致（与页面脚本同一规则）。"""
+        store_id = control.get("store_id") or ""
+        if store_id:
+            return next((x for x in STORES if x["id"] == store_id), None)
+        label = normal(control.get("label", "")).removeprefix("apple")
+        return next((x for x in STORES if label and normal(x["name"]).removeprefix("apple") == label), None)
+
+    def usable_stores(self, s: dict) -> list:
+        """同城、未排除、可点且没写着不能取货的门店，保持官网列表顺序。"""
+        found = []
+        for c in s.get("controls", []):
+            if c.get("group") != "store" or c.get("disabled"):
+                continue
+            store = self.store_of(c)
+            if (store and store["city"] == self.store_city and store["id"] not in self.exhausted_stores
+                    and not STORE_UNAVAILABLE.search(normal(c.get("label", "")))):
+                found.append((store, c))
+        return found
+
+    def use_store(self, store: dict):
+        """改用另一家门店。上一家门店的日期和时段记录不适用于新门店，一并清掉。"""
+        self.target.update(store=store["name"], store_id=store["id"])
+        self.preferences.update(store=store["name"], store_id=store["id"])
+        self.pickup_exhausted_dates = set()
+        self.pickup_confirmed_dates = []
+        self.pickup_empty_since = None
+        self.pickup_schedule_wait_since = None
+        self.fulfillment_verified = False
+        for key in [k for k in self.sent if k.startswith(("pickup_date:", "pickup_time:"))]:
+            del self.sent[key]
+            self.action_times.pop(key, None)
+
+    def click_store(self, control: dict, now: float) -> Optional[Decision]:
+        """选门店是可以改的选择，按门店分别计次：同一家点了两次仍没选上才停下。"""
+        action = "store:" + self.target["store_id"]
+        if control.get("selected"):
+            return None
+        count = self.sent.get(action, 0)
+        if count and now - self.action_times.get(action, now) < 5:
+            return Decision("wait", "等待门店选择生效：" + self.target["store"])
+        if count >= 2:
+            return self.finish("attention", "门店选项未生效：" + self.target["store"])
+        self.sent[action] = count + 1
+        self.action_times[action] = now
+        self.pending = (action, now)
+        return Decision("click", action, control["ref"])
+
+    def ensure_store(self, s: dict, now: float, reason: str = "") -> Optional[Decision]:
+        """手动开始时保证选中的是能取货的门店。
+
+        页面上已选中一家能用的同城门店就直接采用；否则当前门店能用就不动；再否则改选
+        官网列表里第一家能用的同城门店。选定的就是当前门店时返回 None，交给原有流程。
+        连续 2 秒一家能用的都没有才结束。换门店后这次读到的页面数据是按旧门店算的，
+        所以只发出点击或等待，下一轮重新读取。
+        """
+        stores = [c for c in s.get("controls", []) if c.get("group") == "store"]
+        if not stores and not reason:
+            return None  # 门店列表还没出来，交给原有逻辑等待或选择地区
+        if stores and not any(self.store_of(c) for c in stores):
+            return None  # 一家门店都认不出来：不能据此判断有没有货，交给原有流程等待或超时
+        usable = self.usable_stores(s)
+        if not usable:
+            if self.store_none_since is None:
+                self.store_none_since = now
+            if now - self.store_none_since < 2:
+                return Decision("wait", "同城门店暂时都不可取货，再次确认")
+            last = reason or self.store_exhaust_reason
+            return self.finish("sold_out", (last + "；" if last else "") + "同城其他门店也都不可取货")
+        self.store_none_since = None
+        picked = ([x for x in usable if x[1].get("selected")] or
+                  [x for x in usable if x[0]["id"] == self.target.get("store_id")] or usable)
+        store, control = picked[0]
+        if sum(1 for x in usable if x[0]["id"] == store["id"]) > 1:
+            return self.finish("attention", "门店选项匹配不唯一，请核对官网门店")
+        if store["id"] == self.target.get("store_id"):
+            return None
+        self.use_store(store)
+        return self.click_store(control, now) or Decision("wait", "已改选" + store["name"] + "，重新读取页面")
+
+    def next_store(self, s: dict, now: float, reason: str) -> Decision:
+        """当前门店不能取货：手动开始时排除它、换同城下一家；其余情况按原规则结束本次尝试。"""
+        if not self.flexible_store():
+            return self.finish("sold_out", reason)
+        self.exhausted_stores.add(self.target.get("store_id", ""))
+        self.store_exhaust_reason = reason
+        return self.ensure_store(s, now, reason) or Decision("wait", "重新读取门店列表")
 
     def elapsed(self, now: float) -> float:
         return round(now - self.started, 3) if self.started is not None else 0
@@ -713,6 +816,10 @@ class Attempt:
             if region_decision:
                 return region_decision
             if self.method == "pickup":
+                if self.flexible_store() and not s.get("pickup_region_open"):
+                    store_decision = self.ensure_store(s, now)
+                    if store_decision:
+                        return store_decision
                 if (self.target.get("pickup_dates") or self.preferences.get("pickup_date_policy") == "earliest") and s.get("store_selected"):
                     from pickup_monitor import checkout_date_decision
                     date_decision = checkout_date_decision(s, self.preferences["pickup_dates"], self.pickup_exhausted_dates, self.preferences.get("pickup_date_policy", "specified"))
@@ -729,6 +836,8 @@ class Attempt:
                                 self.pickup_schedule_wait_since = now
                             if now - self.pickup_schedule_wait_since < 12:
                                 return Decision("wait", "门店已选中，等待取货日期面板和日期摘要加载（最多 12 秒）")
+                        if date_decision.kind == "sold_out" and self.flexible_store():
+                            return self.next_store(s, now, self.target["store"] + "：" + date_decision.reason)
                         return date_decision
                     self.pickup_schedule_wait_since = None
                     if self.preferences.get("pickup_date_policy") == "earliest":
@@ -741,7 +850,7 @@ class Attempt:
                                       if c.get("group") == "store" and c.get("store_matches") and c.get("selected")]
                         self.pickup_confirmed_dates = sorted({d for label in chosen for d in dates_in(label)})
                 if s.get("pickup_unavailable"):
-                    return self.finish("sold_out", self.preferences["store"] + "自提不可用")
+                    return self.next_store(s, now, self.preferences["store"] + "自提不可用")
                 if s.get("pickup_region_open"):
                     step = s.get("pickup_region_step", "")
                     value = self.target.get("pickup_region", {}).get(step, "")
@@ -790,7 +899,7 @@ class Attempt:
                                 next_dates = [c for c in next_dates if len(ds := dates_in(c.get("label", "") + " " + c["value"])) == 1 and ds[0] in self.preferences["pickup_dates"]]
                             if next_dates:
                                 return schedule_choice(dates[0], next_dates[0])
-                            return self.finish("sold_out", "目标门店当前可选日期均无签到时段；结束本次尝试")
+                            return self.next_store(s, now, "目标门店当前可选日期均无签到时段；结束本次尝试")
                         return Decision("wait", self.fulfillment_wait_reason(s))
                     options = [c for c in s.get("controls", []) if c.get("group") == key
                                and not c.get("disabled")]
@@ -799,6 +908,8 @@ class Attempt:
                         if len(options) > 1:
                             return self.finish("attention", "目标门店匹配不唯一，请核对官网门店")
                     if options:
+                        if key == "store" and self.flexible_store():
+                            return self.click_store(options[0], now) or Decision("wait", "等待门店选择生效")
                         return click(options[0], key)  # Official chronological order.
                     if key == "store":
                         if s.get("region_picker"):

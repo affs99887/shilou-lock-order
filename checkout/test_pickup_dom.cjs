@@ -15,6 +15,15 @@ test('busy appointment group remains loading even when old options are present',
  const w=page('<div aria-busy="true"><select name="pickup-time"><option value="slot">10:00 – 10:15</option></select></div>');
  assert.equal(w.appleCheckout({}).pickup_schedule[0].disabled,true);w.close();
 });
+test('store radios expose their own store number so another store can be chosen',()=>{
+ const store=(id,name,extra='')=>`<input type="radio" name="checkout.fulfillment.pickupTab.pickup.storeLocator.selectStore" id="s-${id}" value="${id}" ${extra}><label for="s-${id}">${name}</label>`;
+ const w=page(store('R683','Apple 环球港','disabled')+store('R390','Apple 香港广场'));
+ const target={store:'Apple 环球港',store_id:'R683'};
+ const stores=t=>[...w.appleCheckout({target:t}).controls].filter(c=>c.group==='store');
+ assert.deepEqual(stores(target).map(c=>[c.store_id,c.store_matches,c.disabled]),[['R683',true,true],['R390',false,false]]);
+ assert.deepEqual(stores({store:'Apple 香港广场',store_id:'R390'}).map(c=>c.store_matches),[false,true]);
+ w.close();
+});
 test('phone verification and privacy consent expose safe handoff flags',()=>{
  const w=page('<h1>填写你的取货信息</h1><input name="phone" required><button data-autom="contactVerify-button-fullDaytimePhone">验证</button>');
  w.document.querySelector('h1').remove();

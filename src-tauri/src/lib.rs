@@ -369,6 +369,7 @@ async fn checkout_command(
         "read_profile",
         "acknowledge_order",
         "login",
+        "manual",
     ]
     .contains(&op.as_str())
     {
@@ -379,7 +380,8 @@ async fn checkout_command(
         return Err("参数格式错误".into());
     }
     message["op"] = serde_json::json!(op);
-    if op == "rehearse" {
+    // 演练和手动开始都不看监控结果，只带上目标门店和商品；有没有货由官网页面决定。
+    if op == "rehearse" || op == "manual" {
         let state = app.state::<AppState>();
         let key = message["targetKey"]
             .as_str()

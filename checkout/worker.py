@@ -150,7 +150,7 @@ class Checkout(core.Service):
         # fixed category. Contact values and arbitrary error text never enter
         # this diagnostic file.
         category = action.split(":", 1)[0]
-        if category in ("pickup_date", "pickup_time", "fill"):
+        if category in ("pickup_date", "pickup_time", "fill", "store"):
             action = category
             allowed_actions.add(category)
         if action in {"region_" + method + "_" + step
@@ -302,6 +302,11 @@ class Checkout(core.Service):
             self.last_handoff=None
 
     def attention(self, reason):
+        if getattr(self.owner, 'manual_run', False):
+            # 手动开始和演练共用同一套单次流程，提示里别写成「演练」。
+            reason = (reason.replace('；单次测试结束，不循环抢购', '；本次手动选购已停止，可换配置或刷新门店后重试')
+                      .replace('尚未开放购买，演练未验证；不会无限等待', '官网尚未开放购买；开放后再点「手动开始选购」')
+                      .replace('单次演练超过 5 分钟', '手动选购超过 5 分钟'))
         if self.access_blocked:
             code = self.status.get('diagnostics', {}).get('access_http_status', 0)
             reason = ('Apple 返回 HTTP ' + str(code) if code in (403,429,541) else 'Apple 拒绝访问') + \
@@ -335,7 +340,8 @@ class Checkout(core.Service):
     def event(self, kind, reason='', **extra):
         if kind == 'action':
             self.record_diagnostic("ACTION", action=reason, result=extra.get('result', ''))
-        if kind in ('sold_out', 'over_budget') and self.owner.automatic:
+        # 手动开始没货时要照常提醒本人，不走「等下一次有货再换目标」那条静默结束的路。
+        if kind in ('sold_out', 'over_budget') and self.owner.automatic and not getattr(self.owner, 'manual_run', False):
             self.owner.retryable_end = True
         return super().event(kind, reason, **extra)
 
@@ -425,6 +431,8 @@ class Bridge:
         self.reserved = False
         # 正在进行「提前登录」：只打开账号页等本人登录，不加购、不结账。
         self.login_task = False
+        # 当前流程是「手动开始选购」：不需要监控确认有货，到选门店时可改选同城有货门店。
+        self.manual_run = False
         self.stopping = False
         self.generation = 0
         self.notice = None
@@ -451,7 +459,8 @@ class Bridge:
                     'regions': list(REGIONS.values()),
                     'orderNeedsReview': self.order_guard.blocked,
                     'session': s.get('session'),
-                    'loginTask': self.login_task}
+                    'loginTask': self.login_task,
+                    'manualRun': self.manual_run}
 
     def request(self, message):
         op = message.get('op')
@@ -552,13 +561,20 @@ class Bridge:
                 if source is None:
                     raise ValueError('未找到旧选购方案，请在此设置')
                 return self.request({'op': 'configure', 'plan': json.loads(source.read_text(encoding='utf-8'))})
-            if op in ('arm', 'rehearse', 'purchase', 'save_profile'):
+            if op in ('arm', 'rehearse', 'purchase', 'manual', 'save_profile'):
                 if op == 'save_profile' and message.get('locale', self.plan.get('checkout_locale', 'zh_CN')) != self.plan.get('checkout_locale', 'zh_CN'):
                     raise ValueError('请先保存选购地区，再保存对应地区资料')
-                if op in ('arm', 'rehearse', 'purchase') and self.order_guard.blocked:
+                if op in ('arm', 'rehearse', 'purchase', 'manual') and self.order_guard.blocked:
                     raise ValueError('上次下单结果需核对；请先查看 Apple 订单，避免重复购买')
-                if op in ('arm', 'purchase') and self.plan.get('auto_submit_order') and message.get('confirmSubmission') is not True:
+                if op in ('arm', 'purchase', 'manual') and self.plan.get('auto_submit_order') and message.get('confirmSubmission') is not True:
                     raise ValueError('正式自动下单必须单独确认；演练不会提交订单')
+                if op == 'manual':
+                    # 不看监控结果：本人确认官网已开卖后直接开始，有没有货由官网页面决定。
+                    if message['hit'].get('target', {}).get('locale') != 'zh_CN':
+                        raise ValueError('手动开始目前只支持中国大陆官网')
+                    plan_for_hit(self.plan, message['hit'], rehearsal=True)
+                    self.submission_confirmed = message.get('confirmSubmission') is True
+                    self.service.update(reason='正在手动开始选购；指定门店不能取货时会改选同城能取货的门店')
                 if op == 'arm':
                     self.activation_pending = True
                     self.submission_confirmed = False
@@ -623,6 +639,7 @@ class Bridge:
                     with self.mutex:
                         self.reserved = False
                         self.login_task = False
+                        self.manual_run = False
                         self.stopping = False
                         self.error = ''
                 try:
@@ -659,9 +676,10 @@ class Bridge:
                                 self.service.update(reason='等待新库存；请开启上方库存监控')
                             self.activation_pending = False
                             self.reserved = False
-                    elif op in ('start', 'rehearse', 'purchase'):
+                    elif op in ('start', 'rehearse', 'purchase', 'manual'):
                         hit = data if op == 'start' else data['hit']
-                        plan_for_hit(self.plan, hit, rehearsal=op == 'rehearse', manual=op == 'purchase')
+                        no_stock_check = op in ('rehearse', 'manual')
+                        plan_for_hit(self.plan, hit, rehearsal=no_stock_check, manual=op == 'purchase')
                         try:
                             self.require_profile()
                         except (ValueError, RuntimeError):
@@ -676,7 +694,10 @@ class Bridge:
                             self.cancel.clear()
                             # Keychain prompts may take time: revalidate stock
                             # again after those waits, before any cart operation.
-                            self.service.preferences = plan_for_hit(self.plan, hit, rehearsal=op == 'rehearse', manual=op == 'purchase')
+                            self.service.preferences = plan_for_hit(self.plan, hit, rehearsal=no_stock_check, manual=op == 'purchase')
+                            if op == 'manual':
+                                # 只作用于这一次执行，不写进保存的方案。
+                                self.service.preferences['store_choice'] = 'same_city'
                             execution = self.service.preferences
                             previous_service = self.service
                             if self.service_factory is Checkout:
@@ -689,7 +710,8 @@ class Bridge:
                                 # Disconnect only our old driver, not Edge or
                                 # any preserved review/payment window.
                                 previous_service.browser.session.disconnect()
-                            self.automatic = op in ('start', 'purchase')
+                            self.automatic = op in ('start', 'purchase', 'manual')
+                            self.manual_run = op == 'manual'
                             if not self.automatic:
                                 self.submission_confirmed = False
                             self.retryable_end = False

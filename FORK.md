@@ -38,6 +38,10 @@ Pending-payment recognition is conservative and has only synthetic acceptance
 coverage; live unpaid-order creation and mobile payment handoff remain UNVERIFIED.
 The current observation fixture documents provider choices and review-page
 inspection, not an end-to-end packaged engine acceptance.
+Manual start (mainland China only) runs the same single attempt without a
+monitor hit. At pickup it may switch to another same-city store whose option is
+enabled and not marked unavailable; store choice is a reversible selection and
+never re-adds to the bag. This switching has offline coverage only.
 The live cart-removal 404 observed in the prior candidate remains an outstanding
 acceptance item; offline tests do not constitute a verified live checkout.
 

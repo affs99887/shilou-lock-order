@@ -18,7 +18,9 @@ type Status = { armed: boolean; busy: boolean; stopping: boolean; mode: string; 
   intervention?: {kind:string;title:string;body:string} | null;
   error?:string; profileRequired?:boolean; activationPending?:boolean;
   /** 最近一次登录检查的结果；还没检查过为空。 */
-  session?: string | null; loginTask?: boolean };
+  session?: string | null; loginTask?: boolean;
+  /** 当前流程是「手动开始选购」。 */
+  manualRun?: boolean };
 
 export function AutoCheckout({ targets, expanded, onSettings }: { targets: Target[]; expanded?: boolean; onSettings?: () => void }) {
   const [status, setStatus] = useState<Status | null>(null);
@@ -27,7 +29,7 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
   const [pending, setPending] = useState(false);
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState("");
-  const [confirmation, setConfirmation] = useState<"arm" | "acknowledge_order" | null>(null);
+  const [confirmation, setConfirmation] = useState<"arm" | "manual" | "acknowledge_order" | null>(null);
   const dirty = useRef(false);
   const locked = pending || !!status?.busy || !!status?.armed || !!status?.stopping;
   const needsAttention = ["attention", "manual_region"].includes(status?.mode || "");
@@ -54,23 +56,26 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
     setPlan(p => p ? { ...p, ...patch } : p);
   }
   async function command(op: string, confirmed = false) {
-    if (!confirmed && ((op === "arm" && plan?.auto_submit_order) || op === "acknowledge_order")) {
-      setConfirmation(op);
+    if (!confirmed && (((op === "arm" || op === "manual") && plan?.auto_submit_order) || op === "acknowledge_order")) {
+      setConfirmation(op as "arm" | "manual" | "acknowledge_order");
       return;
     }
     setConfirmation(null);
     setError(""); setPending(true);
     try {
-      if (op === "rehearse" && status?.armed && !status.busy && !status.stopping) {
+      if ((op === "rehearse" || op === "manual") && status?.armed && !status.busy && !status.stopping) {
         // Explicit rehearsal replaces idle arming, never an active checkout.
         await invoke("checkout_command", { op: "disarm" });
       }
-      if (["arm", "rehearse", "configure"].includes(op)) {
+      if (["arm", "rehearse", "manual", "configure"].includes(op)) {
         if (!plan) throw new Error("选购组件尚未就绪");
         await invoke("checkout_command", { op: "configure", payload: { plan } });
         dirty.current = false;
       }
-      const payload = op === "rehearse" ? { targetKey: selected || (localTargets[0] && targetKey(localTargets[0])) } : { confirmSubmission: op === "arm" && !!plan?.auto_submit_order, confirmed:op === "acknowledge_order" };
+      const chosen = selected || (localTargets[0] && targetKey(localTargets[0]));
+      const payload = op === "rehearse" ? { targetKey: chosen }
+        : op === "manual" ? { targetKey: chosen, confirmSubmission: confirmed && !!plan?.auto_submit_order }
+        : { confirmSubmission: op === "arm" && !!plan?.auto_submit_order, confirmed:op === "acknowledge_order" };
       const result = await invoke<Status>("checkout_command", { op, payload: op === "configure" ? { plan } : payload });
       setStatus(result);
       if (op === "import") { dirty.current = false; setPlan(result.plan); }
@@ -80,13 +85,15 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
   return <section className="checkout-panel shrink-0 rounded-xl border bg-card p-5 text-sm">
     <div className="checkout-heading"><div><span className="eyebrow">有货之后，按你的方案继续</span><h2>自动选购与锁单</h2></div><button className="text-primary font-medium" aria-expanded={expanded ?? open} onClick={() => onSettings ? onSettings() : setOpen(!open)}>{(expanded ?? open) ? "返回捡漏中心" : "设置选购方案 →"}</button></div>
     <div className="checkout-status-grid">
-      <div data-testid="checkout-execution-status"><span>自动选购</span><strong>{status?.stopping ? "停止中" : status?.activationPending ? "正在校验资料" : needsAttention ? "已暂停，需要处理" : status?.mode === "awaiting_payment" ? "订单待支付" : status?.mode === "submitting" ? "正在核对下单结果" : status?.mode === "ready" ? "已到订单核对页" : status?.busy ? "正在执行" : status?.armed ? "已启用，等待命中" : "未启用"}</strong></div>
+      <div data-testid="checkout-execution-status"><span>自动选购</span><strong>{status?.stopping ? "停止中" : status?.activationPending ? "正在校验资料" : needsAttention ? "已暂停，需要处理" : status?.mode === "awaiting_payment" ? "订单待支付" : status?.mode === "submitting" ? "正在核对下单结果" : status?.mode === "ready" ? "已到订单核对页" : status?.busy ? (status.manualRun ? "手动选购执行中" : "正在执行") : status?.armed ? "已启用，等待命中" : "未启用"}</strong></div>
       <div data-testid="submission-status"><span>实际下单权限</span><strong>{status?.submissionEnabled ? "已授权自动下单" : "停在提交前"}</strong></div>
       <div><span>付款方案</span><strong>{!plan ? "读取中…" : plan.financing === "official" ? `${plan.installment_option || "未选渠道"} · ${plan.installment_months || "—"} 期` : plan.financing === "manual" ? "官网手动选择" : `${plan.payment} · 全款`}</strong></div>
     </div>
     {plan && <p className="mt-3 rounded-lg bg-muted p-3" data-testid="pickup-rule-summary"><strong>取货规则：</strong>{pickupSummary}</p>}
+    <label className="mt-3 flex flex-wrap items-center gap-2">选购目标<select aria-label="选购目标" className="max-w-lg rounded border bg-background text-foreground p-2" value={selected} onChange={e => setSelected(e.target.value)}><option value="">本地区列表第一项</option>{localTargets.map(t => <option key={targetKey(t)} value={targetKey(t)}>{t.storeTitle} · {t.productName}</option>)}</select></label>
     <div className="checkout-actions flex flex-wrap items-center gap-2">
       <Button disabled={locked || !localTargets.length || !plan} onClick={() => void command("arm")}>{status?.armed ? "已启用，等待有货" : "启用有货自动选购"}</Button>
+      <Button size="sm" disabled={pending || !!status?.busy || !!status?.stopping || !localTargets.length || !plan || foreign} title="不等监控：按所选目标的型号直接开始选购；指定门店不能取货时改选同城能取货的门店" onClick={() => void command("manual")}>手动开始选购</Button>
       <Button size="sm" variant="secondary" disabled={pending || !!status?.busy || !!status?.stopping || !localTargets.length || !plan} onClick={() => void command("rehearse")}>测试演练</Button>
       <Button size="sm" variant="outline" disabled={pending || !status?.busy || status.stopping || status.mode === "ready"} onClick={() => void command("continue")}>人工处理后继续</Button>
       <Button size="sm" variant="outline" disabled={pending} onClick={() => void command("stop")}>停止选购</Button>
@@ -97,12 +104,12 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
     <Dialog open={confirmation !== null} onOpenChange={value => { if (!value) setConfirmation(null); }}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{confirmation === "arm" ? "确认启用自动下单" : "确认已核对 Apple 订单"}</DialogTitle>
-          <DialogDescription>{confirmation === "arm" ? "正式选购将按已保存的配置、总预算和付款方案，自动点击 Apple 的「立即下单」并接受该订单的商店条款，创建真实订单。付款、授信和签约仍由你本人完成。测试演练永不提交。" : "请先在 Apple 官网查看订单，确认上次下单结果，并确定不会重复购买。完成核对后才能开始新的选购。"}</DialogDescription>
+          <DialogTitle>{confirmation === "arm" ? "确认启用自动下单" : confirmation === "manual" ? "确认手动开始并自动下单" : "确认已核对 Apple 订单"}</DialogTitle>
+          <DialogDescription>{confirmation === "arm" ? "正式选购将按已保存的配置、总预算和付款方案，自动点击 Apple 的「立即下单」并接受该订单的商店条款，创建真实订单。付款、授信和签约仍由你本人完成。测试演练永不提交。" : confirmation === "manual" ? "将不等监控，按所选目标的型号直接开始选购；指定门店不能取货时改选同城能取货的门店。到订单核对页后自动点击「立即下单」创建真实订单。付款、授信和签约仍由你本人完成。" : "请先在 Apple 官网查看订单，确认上次下单结果，并确定不会重复购买。完成核对后才能开始新的选购。"}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" onClick={() => setConfirmation(null)}>取消</Button>
-          <Button disabled={locked} onClick={() => { if (confirmation) void command(confirmation, true); }}>{confirmation === "arm" ? "确认启用并授权下单" : "已核对，允许新选购"}</Button>
+          <Button disabled={confirmation === "manual" ? pending || !!status?.busy || !!status?.stopping : locked} onClick={() => { if (confirmation) void command(confirmation, true); }}>{confirmation === "arm" ? "确认启用并授权下单" : confirmation === "manual" ? "确认开始并授权下单" : "已核对，允许新选购"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -111,7 +118,7 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
     {(error || status?.error) && <p className="mt-1 text-destructive" role="alert">{error || status?.error}</p>}
     {status?.profileRequired && <div className="mt-2 rounded border border-amber-500 p-3" role="alert"><strong>请先填写并保存联系与收货资料。</strong><Button variant="outline" size="sm" disabled={locked} onClick={() => !(expanded ?? open) && onSettings ? onSettings() : setOpen(true)}>填写收货资料</Button></div>}
     {status?.orderNeedsReview && <div className="mt-2 rounded border border-amber-500 p-2">已有下单记录。先在 Apple 核对订单，停止选购后才能清除此保护。<Button variant="outline" size="sm" disabled={locked} onClick={() => void command("acknowledge_order")}>已核对订单，允许新选购</Button></div>}
-    <p className="section-note">测试演练无需开启监测或提前加购；按所选目标在官网验证，始终停在提交前。正式选购先开启监测，再启用自动选购。</p>
+    <p className="section-note">测试演练无需开启监测或提前加购；按所选目标在官网验证，始终停在提交前。正式选购先开启监测，再启用自动选购。监控出问题时可点「手动开始选购」：不等监控，按所选目标的型号直接开始；指定门店不能取货时改选同城能取货的门店，是否自动下单按方案设置。</p>
     {(expanded ?? open) && plan && <div className="plan-fields mt-5 grid gap-5 border-t pt-5">
       <label className="font-semibold">选购国家／地区<select aria-label="选购国家／地区" className="block rounded border bg-background text-foreground p-2 mt-2" disabled={locked} value={locale} onChange={e=>{setSelected('');edit({checkout_locale:e.target.value,max_price:0,auto_submit_order:false,financing:e.target.value==='zh_CN'?'full':'manual',payment:e.target.value==='zh_CN'?'支付宝':'官网手动选择',installment_option:'',installment_months:0});}}>{checkoutRegions.map(r=><option key={r.locale} value={r.locale}>{r.title} · {r.currency}</option>)}</select></label>
       {foreign&&<p role="status" className="rounded-xl bg-amber-50 p-3 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">国际选购候选适配 · 尚未完成当地官网全流程验收。仅处理本地区监控目标；银行卡、付款、分期及最终下单由本人完成，不承诺待支付锁单。请重新设置当地货币预算及资料。</p>}
@@ -155,7 +162,7 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
       </>}
       {foreign && <p className="section-note">国际日期仅按官网可明确核验的日期选择；无法识别时提示本人处理，不猜测当地日期。</p>}
       <label className="flex items-center gap-2"><input type="checkbox" disabled={locked} checked={plan.clear_bag_before_purchase} onChange={e => edit({clear_bag_before_purchase:e.target.checked})} />每次新选购前清空当前 Apple 账号购物袋（包括已有商品）</label>
-      <div className="flex flex-wrap items-center gap-2"><label>演练目标：</label><select className="max-w-lg rounded border bg-background text-foreground p-2" value={selected} onChange={e => setSelected(e.target.value)}><option value="">本地区列表第一项</option>{localTargets.map(t => <option key={targetKey(t)} value={targetKey(t)}>{t.storeTitle} · {t.productName}</option>)}</select><Button variant="outline" size="sm" disabled={locked} onClick={() => void command("import")}>导入原抢先购方案</Button><Button variant="outline" size="sm" disabled={locked} onClick={() => void command("configure")}>保存设置</Button></div>
+      <div className="flex flex-wrap items-center gap-2"><Button variant="outline" size="sm" disabled={locked} onClick={() => void command("import")}>导入原抢先购方案</Button><Button variant="outline" size="sm" disabled={locked} onClick={() => void command("configure")}>保存设置</Button></div>
       {!localTargets.length&&<p role="alert">当前选购地区没有监控目标，请先在捡漏中心添加对应地区的商品和门店。</p>}
       <p className="section-note">{foreign?'到付款或需要人工处理时发送 Bark 提醒；国际版不自动锁单、付款或授信。':'确认待支付状态后发送 Bark 提醒。下单不保证留货；授信、签约和支付由本人完成。'}</p>
     </div>}

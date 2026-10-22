@@ -167,6 +167,33 @@ test('foreign payment handoff stays prominent and does not claim a paid or locke
  a.hooks[0].intervention=null;
  assert.equal(a.nodes().find(n=>n.props['data-testid']==='checkout-intervention'),undefined);
 });
+test('manual start sends the selected target without asking when auto-submit is off', async () => {
+ const targets=[{locale:"zh_CN",storeNumber:"R575",partNumber:"A",storeTitle:"武汉",productName:"甲"},{locale:"zh_CN",storeNumber:"R683",partNumber:"B",storeTitle:"环球港",productName:"乙"}];
+ const a = ui({}, targets);
+ const picker = a.nodes().find(n => n.props?.['aria-label'] === '选购目标');
+ picker.props.onChange({ target: { value: 'zh_CN|R683|B' } });
+ a.button('手动开始选购').props.onClick(); await new Promise(setImmediate);
+ assert.deepEqual(a.calls.map(x => x.op), ['configure', 'manual']);
+ assert.equal(a.calls[1].payload.targetKey, 'zh_CN|R683|B');
+ assert.equal(a.calls[1].payload.confirmSubmission, false);
+});
+test('manual start with auto-submit asks first, then disarms an idle arming and sends the confirmation', async () => {
+ const a = ui({ auto_submit_order: true }); a.hooks[0].armed = true;
+ assert.equal(a.button('手动开始选购').props.disabled, false, '已启用但空闲时也能手动开始');
+ a.button('手动开始选购').props.onClick(); await new Promise(setImmediate);
+ assert.equal(a.calls.length, 0); assert.equal(a.hooks[6], 'manual');
+ a.button('确认开始并授权下单').props.onClick(); await new Promise(setImmediate);
+ assert.deepEqual(a.calls.map(x => x.op), ['disarm', 'configure', 'manual']);
+ assert.equal(a.calls.at(-1).payload.confirmSubmission, true);
+});
+test('manual start stays disabled while a checkout runs, is stopping, or for other regions', () => {
+ const busy = ui(); busy.hooks[0].busy = true;
+ assert.equal(busy.button('手动开始选购').props.disabled, true);
+ busy.hooks[0].busy = false; busy.hooks[0].stopping = true;
+ assert.equal(busy.button('手动开始选购').props.disabled, true);
+ const foreign = ui({ checkout_locale: 'en_SG' }, [{locale:"en_SG",storeNumber:"R669",partNumber:"X",storeTitle:"SG",productName:"x"}]);
+ assert.equal(foreign.button('手动开始选购').props.disabled, true);
+});
 test('advance login is one click, needs no plan save, and shows the account state', async () => {
  const a = ui();
  const session = () => a.nodes().find(n => n.props?.['data-testid'] === 'checkout-session').props.children.join('');
