@@ -148,6 +148,8 @@ test("pending and failed inventory remain distinguishable with their actual reas
     [{ reason: "rate_limited" }, "Apple 接口限流或暂时不可用，程序会延长间隔后重试。具体原因见查询日志。"],
     [{ reason: "transport", detail: "连接超时" }, "网络请求失败：连接超时"],
     [{ reason: "schema_drift", field: "pickupDisplay", raw: "changed" }, "接口返回结构与预期不符：pickupDisplay = changed"],
+    [{ reason: "schema_drift", field: "pickupDisplay", raw: "default" },
+      "Apple 暂未开放这款在该店的到店取货（官网状态 default），开放后会自动显示有货或无货"],
     [{ reason: "apple_error", message: "服务不可用" }, "Apple 返回错误：服务不可用"],
   ];
   for (const [reason, detail] of cases) {

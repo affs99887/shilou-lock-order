@@ -97,3 +97,57 @@ class HandoffNotifications(unittest.TestCase):
             self.s.login_probe_at=0;self.s.watch_login_tick()
             self.assertEqual(self.s.command.call_count,i)
         self.s.command.assert_called_once_with('continue')
+
+    def login_attempt(self):
+        from checkout_engine import Attempt,variants
+        attempt=Attempt(self.s.preferences,variants(self.s.preferences)[0],0)
+        attempt.bag_verified=True
+        return attempt
+
+    def test_login_during_checkout_waits_thirty_minutes_then_resumes_itself(self):
+        import checkout_service
+        self.b.cancel.clear()
+        self.s.phase='RUN';self.s.active=True;self.s.next_probe=0;self.s.attempt=self.login_attempt()
+        self.s.browser=Mock();self.s.browser.call.return_value={'stage':'LOGIN','diagnostics':{}}
+        with patch('worker.time.monotonic',return_value=5000.0):
+            self.s.tick()
+        self.assertTrue(self.s.login_watch,'结账中途要求登录时应当等本人登录，而不是直接停住')
+        self.assertEqual(checkout_service.LOGIN_WAIT_SECONDS,30*60)
+        self.assertEqual(self.s.login_watch_until,5000.0+checkout_service.LOGIN_WAIT_SECONDS)
+        self.assertEqual(self.b.notice['kind'],'login')
+        self.assertIn('自动接着结账',self.b.notice['body'])
+
+    def test_login_returning_to_bag_resumes_with_one_fresh_checkout_click(self):
+        self.s.login_watch=True;self.s.login_watch_until=10**12;self.s.phase='RUN'
+        self.s.attempt=self.login_attempt()
+        self.s.attempt.sent.update(add=1,checkout=1);self.s.attempt.action_times.update(add=0,checkout=0)
+        self.s.browser=Mock();self.s.browser.call.return_value={'stage':'BAG','fingerprint':'bag','diagnostics':{}}
+        self.s.command=Mock()
+        for i in range(2):
+            self.s.login_probe_at=0;self.s.watch_login_tick()
+        self.s.command.assert_called_once_with('continue')
+        self.assertNotIn('checkout',self.s.attempt.sent,'被登录打断的那次结账可以再点一次')
+        self.assertEqual(self.s.attempt.sent['add'],1,'加购记录必须保留，不能重复加购')
+
+    def test_bag_after_login_without_a_verified_bag_still_waits_for_a_person(self):
+        self.s.login_watch=True;self.s.login_watch_until=10**12;self.s.phase='RUN'
+        self.s.attempt=Mock();self.s.attempt.bag_verified=False
+        self.s.browser=Mock();self.s.browser.call.return_value={'stage':'BAG','fingerprint':'bag','diagnostics':{}}
+        self.s.command=Mock();self.s.attention=Mock()
+        self.s.login_probe_at=0;self.s.watch_login_tick()
+        self.s.command.assert_not_called();self.s.attention.assert_called_once()
+
+    def test_waiting_for_login_reminds_again_every_five_minutes(self):
+        from worker import LOGIN_REMINDER_SECONDS
+        self.s.login_watch=True;self.s.login_watch_until=10**12;self.s.phase='RUN'
+        self.s.attempt=self.login_attempt()
+        self.s.browser=Mock();self.s.browser.call.return_value={'stage':'LOGIN','diagnostics':{}}
+        clock=[1000.0]
+        with patch('worker.time.monotonic',side_effect=lambda:clock[0]):
+            self.s.login_probe_at=0;self.s.watch_login_tick()
+            first=self.b.notice['id']
+            clock[0]+=LOGIN_REMINDER_SECONDS-1;self.s.login_probe_at=0;self.s.watch_login_tick()
+            self.assertEqual(self.b.notice['id'],first,'不到间隔不重复提醒')
+            clock[0]+=2;self.s.login_probe_at=0;self.s.watch_login_tick()
+            self.assertNotEqual(self.b.notice['id'],first,'到了间隔再提醒一次')
+            self.assertEqual(self.b.notice['kind'],'login')

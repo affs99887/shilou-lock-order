@@ -368,6 +368,7 @@ async fn checkout_command(
         "save_profile",
         "read_profile",
         "acknowledge_order",
+        "login",
     ]
     .contains(&op.as_str())
     {
@@ -518,9 +519,12 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
         }
 
         if let Event::CycleComplete { snapshot, .. } = &event {
-            // 有货、无货都算拿到了结果；一个都没有就是这一轮什么也没查到。
-            let answered =
-                snapshot.is_empty() || snapshot.iter().any(|s| !s.availability.is_unknown());
+            // 有货、无货都算拿到了结果；Apple 回了「暂未开放到店取货」也算，那是开售前
+            // 的正常状态。一个都没有才是这一轮什么也没查到。
+            let answered = snapshot.is_empty()
+                || snapshot
+                    .iter()
+                    .any(|s| !s.availability.is_unknown() || s.availability.is_pickup_not_open());
             if let Some(alert) = failure_alert.on_cycle(answered, std::time::Instant::now()) {
                 // 标题都带「有货」二字：飞书机器人开了关键词校验时，不含关键词的消息会被拒收。
                 let notification = match alert {

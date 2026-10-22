@@ -301,4 +301,37 @@ class RecoveryTests(unittest.TestCase):
                 b.request({'op':'offer','hits':[hit()]})
                 self.assertTrue(b.tasks.empty())
 
+class FakeLogin(FakeCheckout):
+    """提前登录：打开账号页后第一次检查就确认已登录。"""
+    def __init__(self, owner, plan):
+        super().__init__(owner, plan);self.commands=[]
+    def command(self, name):
+        self.commands.append(name);self.active=name=='login'
+    def tick(self):
+        self.active=False
+        self.status.update(mode='completed',session='账号页登录已确认')
+        self.owner.closed=True
+
+class LoginTaskTests(unittest.TestCase):
+    @patch.object(Bridge,'acquire')
+    def test_login_runs_only_when_idle_and_hands_the_worker_back(self, *_):
+        with tempfile.TemporaryDirectory() as d:
+            b=Bridge(FakeLogin,data=Path(d))
+            b.armed=True
+            with self.assertRaises(ValueError):b.request({'op':'login'})
+            b.armed=False
+            self.assertTrue(b.request({'op':'login'})['busy'])
+            b.run()
+            # 末尾的 stop 是测试结束后台循环时的收尾，不是登录流程发出的。
+            self.assertEqual(b.service.commands,['login','stop'])
+            self.assertFalse(b.error)
+            self.assertFalse(b.reserved,'登录确认后要交还选购后台，之后才能启用自动选购')
+            self.assertFalse(b.status()['loginTask'])
+            self.assertEqual(b.status()['session'],'账号页登录已确认')
+    def test_login_is_only_offered_for_the_mainland_store(self):
+        with tempfile.TemporaryDirectory() as d:
+            b=Bridge(FakeLogin,data=Path(d));b.plan['checkout_locale']='en_SG'
+            with self.assertRaises(ValueError):b.request({'op':'login'})
+            self.assertFalse(b.reserved)
+
 if __name__=='__main__':unittest.main()

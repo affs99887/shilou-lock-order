@@ -593,8 +593,11 @@ fn success_outcome(group: StoreGroup, result: &StoreAvailability) -> StoreOutcom
     }
 
     let dead = resolved == 0 && !group.parts.is_empty();
+    // 全都是「暂未开放到店取货」：Apple 正常回了数据，只是还没开放，新品开售前就是
+    // 这样。不算接口变化，不告警也不退避：退避会把间隔拉长到几十秒，开放那一刻就晚了。
+    let not_open = dead && parts.iter().all(|(_, a)| a.is_pickup_not_open());
     StoreOutcome {
-        trouble: dead.then(|| TroubleReport {
+        trouble: (dead && !not_open).then(|| TroubleReport {
             reason: format!(
                 "门店 {} 的全部型号都没能拿到明确答复，Apple 可能已调整接口",
                 group.store_number
@@ -604,7 +607,7 @@ fn success_outcome(group: StoreGroup, result: &StoreAvailability) -> StoreOutcom
         locale: group.locale,
         store_number: group.store_number,
         parts,
-        ok: !dead,
+        ok: !dead || not_open,
         problems,
         uncovered: false,
     }

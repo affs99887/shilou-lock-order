@@ -41,6 +41,9 @@ PREPARATION = ROOT / ".apple_checkout_preparation.json"
 CONTROLS = {"start", "pause", "stop", "continue", "local_check", "login", "session_check",
             "product_check", "bag_test", "rehearse_delivery", "rehearse_pickup", "rehearse"}
 PURCHASE_TASKS = {"bag_test", "rehearse_delivery", "rehearse_pickup", "rehearse"}
+# 结账中途要求登录时，等本人登录的最长时间。开售时人可能不在电脑前，多等一会儿；
+# 等待期间只读检查页面，不刷新、不点击。
+LOGIN_WAIT_SECONDS = 30 * 60
 JS = (ROOT / "checkout_browser.js").read_text(encoding="utf-8")
 ADAPTER_VERSION = hashlib.sha256(JS.encode("utf-8")).hexdigest()
 
@@ -707,7 +710,7 @@ class Service:
         if now < self.login_probe_at or time.time() < self.breaker.until:
             return
         if now >= self.login_watch_until:
-            self.attention("登录等待超过 15 分钟；保留现场，请人工处理后继续")
+            self.attention("登录等待超过 %d 分钟；保留现场，请人工处理后继续" % (LOGIN_WAIT_SECONDS // 60))
             return
         self.login_probe_at = now + 2
         s = self.browser.call(self.profile, self.attempt.target if self.attempt else {})
@@ -727,7 +730,10 @@ class Service:
         bag_return = self.phase == "CLEAR_BAG" and self.pending_remove is None and stage == "BAG"
         checkout_return = (self.phase == "RUN" and stage in ("FULFILLMENT","CONTACT","PAYMENT","REVIEW")
                            and self.attempt and self.attempt.bag_verified)
-        if not (bag_return or checkout_return):
+        # 登录后官网也可能先回到购物袋。购物袋已核对过，回来只需再核对一遍、再点一次结账。
+        run_bag_return = (self.phase == "RUN" and stage == "BAG"
+                          and self.attempt and self.attempt.bag_verified)
+        if not (bag_return or checkout_return or run_bag_return):
             self.attention("登录后未回到已核对的结账流程：" + stage + "；未重新加购或跳过检查")
             return
         if s.get("diagnostics", {}).get("visible_dialog") and s.get("stock_issue") not in ("all", "delivery", "pickup"):
@@ -737,6 +743,11 @@ class Service:
         self.login_candidate_count = self.login_candidate_count + 1 if candidate == self.login_candidate else 1
         self.login_candidate = candidate
         if self.login_candidate_count >= 2:
+            if run_bag_return:
+                # 结账按钮每次尝试只许点一次，防止重复跳转。那一次被登录打断了，回到购物袋后
+                # 只放开这一个按钮；加购、改数量等其余操作记录照旧保留，不会重复执行。
+                self.attempt.sent.pop("checkout", None)
+                self.attempt.action_times.pop("checkout", None)
             self.command("continue")
             self.event("login_resumed", "连续两次确认返回原结账流程；保留购物袋与操作记录")
             self.update(session="已返回结账流程；不据此承诺免再次认证")
@@ -1126,11 +1137,11 @@ class Service:
                          (self.phase == "CLEAR_BAG" and self.pending_remove is None))
             if s.get("stage") == "LOGIN" and can_watch:
                 self.login_watch = True
-                self.login_watch_until = time.monotonic() + 900
+                self.login_watch_until = time.monotonic() + LOGIN_WAIT_SECONDS
                 self.login_probe_at = 0
                 self.login_candidate = None
                 self.login_candidate_count = 0
-                self.update(reason="请本人登录；后台每 2 秒只读检查，回到原结账页后自动继续。暂停／停止可取消自动恢复")
+                self.update(reason="请本人登录；后台每 2 秒只读检查，登录后回到购物袋或结账页会自动继续，不用点继续。暂停／停止可取消自动恢复")
             return
         if self.phase == "DIAGNOSTIC":
             self.diagnostic_tick(s, now)

@@ -92,8 +92,11 @@ def make_browser(owner):
     return CancellableEdge(EdgeSession(owner.data), core.JS)
 
 
+# 等本人登录或验证期间，隔多久再推送一次提醒。
+LOGIN_REMINDER_SECONDS = 5 * 60
+
 HANDOFFS = {
- 'login': ('Apple 需要登录', '请在 Safari 当前选购窗口完成 Apple 登录；保留购物袋，返回结账页后继续。未下单或付款。'),
+ 'login': ('Apple 需要登录', '请在 Safari 当前选购窗口完成 Apple 登录；登录后会自动接着结账，不用点继续。购物袋保留，未下单或付款。'),
  'privacy': ('请确认 Apple 隐私说明', '官网弹出了 Apple 和你的数据隐私，请本人阅读并自主决定是否同意；软件不会替你勾选。未下单或付款。'),
  'phone': ('请完成取货手机号验证', '请在 Safari 联系人页完成手机号验证，验证码由本人输入；核验通过后从当前页面继续，不重新加购。'),
  'captcha': ('请完成官网安全验证', '请回到 Safari 完成验证码或人机验证；保留购物袋，未下单或付款。'),
@@ -121,6 +124,7 @@ class Checkout(core.Service):
         self.access_blocked = False
         self.trace = []
         self.trace_mark = None
+        self.login_reminder_at = None
 
     def record_diagnostic(self, stage, status=0, action="", result=""):
         # Fixed internal enums only. Never store DOM, URLs, contacts or cookies.
@@ -309,6 +313,20 @@ class Checkout(core.Service):
             self.login_probe_at=0;self.login_candidate=None;self.login_candidate_count=0
             self.update(reason='请本人完成手机号验证；后台只读核验，完成后继续当前流程，不重复加购')
 
+    def watch_login_tick(self):
+        super().watch_login_tick()
+        # 等本人登录或验证期间，每隔一段时间再推送一次：人可能没看到第一条。
+        if not self.login_watch:
+            self.login_reminder_at = None
+            return
+        now = time.monotonic()
+        if self.login_reminder_at is None:
+            self.login_reminder_at = now + LOGIN_REMINDER_SECONDS
+        elif now >= self.login_reminder_at:
+            self.login_reminder_at = now + LOGIN_REMINDER_SECONDS
+            self.last_handoff = None
+            self.require_user_action(self.handoff_kind())
+
     def notify(self, title, body):
         if self.status.get('mode') == 'ready' and self.formal_submission():return
         if self.status.get('mode') in ('ready','attention','manual_region') and not self.owner.retryable_end:
@@ -405,6 +423,8 @@ class Bridge:
         self.mutex = threading.RLock()
         self.armed = False
         self.reserved = False
+        # 正在进行「提前登录」：只打开账号页等本人登录，不加购、不结账。
+        self.login_task = False
         self.stopping = False
         self.generation = 0
         self.notice = None
@@ -429,7 +449,9 @@ class Bridge:
                     'activationPending': self.activation_pending,
                     'profileRequired': self.profile_required,
                     'regions': list(REGIONS.values()),
-                    'orderNeedsReview': self.order_guard.blocked}
+                    'orderNeedsReview': self.order_guard.blocked,
+                    'session': s.get('session'),
+                    'loginTask': self.login_task}
 
     def request(self, message):
         op = message.get('op')
@@ -498,6 +520,15 @@ class Bridge:
                 return self.status()
             if self.reserved or self.armed or self.stopping:
                 raise ValueError('请先停止自动选购，再修改设置或演练')
+            if op == 'login':
+                if self.plan.get('checkout_locale', 'zh_CN') != 'zh_CN':
+                    raise ValueError('提前登录目前只支持中国大陆官网')
+                if self.order_guard.blocked:
+                    raise ValueError('上次下单结果需核对；请先查看 Apple 订单')
+                self.reserved = True
+                self.service.update(reason='正在打开 Apple 账号页；请在弹出的浏览器窗口登录')
+                self.tasks.put_nowait((self.generation, op, message))
+                return self.status()
             if op == 'read_profile':
                 locale = message.get('locale', self.plan.get('checkout_locale', 'zh_CN'))
                 return editable_profile() if locale == 'zh_CN' else editable_profile(locale)
@@ -591,6 +622,7 @@ class Bridge:
                     self.release()
                     with self.mutex:
                         self.reserved = False
+                        self.login_task = False
                         self.stopping = False
                         self.error = ''
                 try:
@@ -670,6 +702,17 @@ class Bridge:
                                 continue
                             self.cancel.clear()
                         self.service.command('continue')
+                    elif op == 'login':
+                        self.acquire()
+                        with self.mutex:
+                            if epoch != self.generation:
+                                self.release()
+                                continue
+                            self.cancel.clear()
+                            if self.service_factory is Checkout and not isinstance(self.service, Checkout):
+                                self.service = Checkout(self, copy.deepcopy(self.plan))
+                        self.service.command('login')
+                        self.login_task = True
                 if not self.cancel.is_set():
                     if getattr(self.service, 'submission_deadline', None):
                         self.service.verify_order_tick()
@@ -679,6 +722,13 @@ class Bridge:
                         self.service.watch_login_tick()
                     elif self.service.region_watch:
                         self.service.watch_region_tick()
+                    if self.login_task and not self.service.active:
+                        # 提前登录结束（已确认登录、超时或需要本人处理）：交还选购后台，
+                        # 之后才能启用自动选购或演练。
+                        with self.mutex:
+                            self.login_task = False
+                            self.reserved = False
+                        self.release()
                     # Retain ownership on unknown writes, login or final review.
                     if self.retryable_end and not self.order_guard.blocked and self.service.status.get('mode') == 'attention' and self.armed and not self.stopping:
                         self.avoid_until[self.current_key] = time.monotonic() + 30

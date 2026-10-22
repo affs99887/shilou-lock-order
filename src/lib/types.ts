@@ -214,7 +214,11 @@ function describeUnknown(a: { kind: "unknown" } & UnknownReason): {
       return {
         label: "未知",
         tone: "unknown",
-        detail: `接口返回结构与预期不符：${a.field} = ${a.raw}`,
+        // 新品开售前 Apple 回的就是 default，不是接口变了；与 Rust 侧 is_pickup_not_open 一致。
+        detail:
+          a.field === "pickupDisplay" && a.raw === "default"
+            ? "Apple 暂未开放这款在该店的到店取货（官网状态 default），开放后会自动显示有货或无货"
+            : `接口返回结构与预期不符：${a.field} = ${a.raw}`,
       };
     case "apple_error":
       return { label: "未知", tone: "unknown", detail: `Apple 返回错误：${a.message}` };

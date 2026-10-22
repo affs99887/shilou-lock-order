@@ -51,6 +51,16 @@ impl Availability {
         }
     }
 
+    /// Apple 正常回了数据，但这款在这家店还没开放到店取货：`pickupDisplay` 为
+    /// `default`，新品开售前查到的就是这个。仍然是未知，不能当成无货。
+    pub fn is_pickup_not_open(&self) -> bool {
+        matches!(
+            self,
+            Self::Unknown(UnknownReason::SchemaDrift { field, raw })
+                if field == "pickupDisplay" && raw == "default"
+        )
+    }
+
     /// 供界面展示的中文描述。
     pub fn label(&self) -> &'static str {
         match self {
@@ -104,6 +114,10 @@ impl UnknownReason {
             Self::NotYetChecked => "尚未查询".to_string(),
             Self::Blocked { detail } => format!("请求被 Apple 拦截：{detail}"),
             Self::RateLimited => "请求过于频繁被限流，正在退避".to_string(),
+            Self::SchemaDrift { field, raw } if field == "pickupDisplay" && raw == "default" => {
+                "Apple 暂未开放这款在该店的到店取货（官网状态 default），开放后会自动显示有货或无货"
+                    .to_string()
+            }
             Self::SchemaDrift { field, raw } => {
                 format!("接口返回结构与预期不符：字段 {field} 的取值为 {raw:?}")
             }

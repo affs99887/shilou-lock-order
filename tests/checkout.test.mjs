@@ -167,3 +167,21 @@ test('foreign payment handoff stays prominent and does not claim a paid or locke
  a.hooks[0].intervention=null;
  assert.equal(a.nodes().find(n=>n.props['data-testid']==='checkout-intervention'),undefined);
 });
+test('advance login is one click, needs no plan save, and shows the account state', async () => {
+ const a = ui();
+ const session = () => a.nodes().find(n => n.props?.['data-testid'] === 'checkout-session').props.children.join('');
+ assert.match(session(), /尚未检查/);
+ a.button('登录 Apple 账户').props.onClick(); await new Promise(setImmediate);
+ assert.deepEqual(a.calls.map(x => x.op), ['login'], '只发 login，不保存方案、不启用选购');
+ a.hooks[0] = { ...a.hooks[0], session: '账号页登录已确认；后续购买复用当前窗口，结账仍可能再次认证' };
+ assert.match(session(), /账号页登录已确认/);
+ a.hooks[0] = { ...a.hooks[0], busy: true, loginTask: true };
+ const waiting = a.button('等待登录…');
+ assert.equal(waiting.props.disabled, true, '登录进行中不能重复发起');
+});
+test('advance login stays disabled while checkout is armed or for other regions', () => {
+ const armed = ui(); armed.hooks[0].armed = true;
+ assert.equal(armed.button('登录 Apple 账户').props.disabled, true);
+ const foreign = ui({ checkout_locale: 'en_SG' });
+ assert.equal(foreign.button('登录 Apple 账户').props.disabled, true);
+});

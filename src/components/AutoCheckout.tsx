@@ -16,7 +16,9 @@ type Plan = { max_price: number; quantity: number; applecare: string; payment: s
 type Status = { armed: boolean; busy: boolean; stopping: boolean; mode: string; stage: string;
   reason: string; elapsed: number; plan: Plan; submissionEnabled: boolean; orderNeedsReview?: boolean; platform?:string;
   intervention?: {kind:string;title:string;body:string} | null;
-  error?:string; profileRequired?:boolean; activationPending?:boolean };
+  error?:string; profileRequired?:boolean; activationPending?:boolean;
+  /** 最近一次登录检查的结果；还没检查过为空。 */
+  session?: string | null; loginTask?: boolean };
 
 export function AutoCheckout({ targets, expanded, onSettings }: { targets: Target[]; expanded?: boolean; onSettings?: () => void }) {
   const [status, setStatus] = useState<Status | null>(null);
@@ -88,7 +90,9 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
       <Button size="sm" variant="secondary" disabled={pending || !!status?.busy || !!status?.stopping || !localTargets.length || !plan} onClick={() => void command("rehearse")}>测试演练</Button>
       <Button size="sm" variant="outline" disabled={pending || !status?.busy || status.stopping || status.mode === "ready"} onClick={() => void command("continue")}>人工处理后继续</Button>
       <Button size="sm" variant="outline" disabled={pending} onClick={() => void command("stop")}>停止选购</Button>
+      <Button size="sm" variant="outline" disabled={locked || foreign} title="打开 Apple 账号页，在弹出的浏览器窗口登录；登录确认后自动结束，不加购" onClick={() => void command("login")}>{status?.loginTask ? "等待登录…" : "登录 Apple 账户"}</Button>
     </div>
+    <p className="mt-2 text-muted-foreground" data-testid="checkout-session">账号登录：{status?.session || "尚未检查。开售前请先点「登录 Apple 账户」登录好，结账时少一步。"}</p>
     {(!plan || !localTargets.length || locked) && <p className="mt-2 text-muted-foreground" data-testid="checkout-disabled-reason">{pending ? "正在处理，请稍候…" : status?.stopping ? "正在停止，完成后可重新启用。" : needsAttention ? "当前选购已暂停，新库存不会另开订单。请按下方原因处理后继续；若官网窗口已关闭，请先停止选购，再重新启用。" : status?.busy ? "选购正在执行；如需重新启用，请先停止选购。" : status?.armed ? "自动选购已启用；修改方案或重新启用前，请先停止选购。" : !plan ? "选购组件尚未就绪；连接失败时请重启软件后重试。" : "请先在捡漏中心添加至少一个监控目标（与选购地区一致）。"}</p>}
     <Dialog open={confirmation !== null} onOpenChange={value => { if (!value) setConfirmation(null); }}>
       <DialogContent>
