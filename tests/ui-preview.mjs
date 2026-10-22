@@ -1,51 +1,101 @@
 // Isolated UI fixture: no native IPC, no Apple requests, no user settings.
-import { chromium } from 'playwright';
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import { resolve, extname } from 'node:path';
 import assert from 'node:assert/strict';
-const out=resolve('ui-review/auto.5');await mkdir(out,{recursive:true});
-const server=createServer(async(req,res)=>{try{const path=resolve('dist','.'+(req.url==='/'?'/index.html':req.url));if(!path.startsWith(resolve('dist')+'/'))throw Error('path');res.setHeader('Content-Type',({'.html':'text/html','.js':'text/javascript','.css':'text/css'})[extname(path)]||'application/octet-stream');res.end(await readFile(path));}catch{res.writeHead(404);res.end();}});
+const out=resolve('ui-review/single-page');await mkdir(out,{recursive:true});
+const screenshot=(target,file,options={})=>process.env.UI_SCREENSHOTS==='0'?Promise.resolve():target.screenshot({path:out+'/'+file,...options});
+const server=createServer(async(req,res)=>{try{const path=resolve('dist','.'+(new URL(req.url,'http://localhost').pathname==='/'?'/index.html':new URL(req.url,'http://localhost').pathname));if(!path.startsWith(resolve('dist')+'/'))throw Error('path');res.setHeader('Content-Type',({'.html':'text/html','.js':'text/javascript','.css':'text/css'})[extname(path)]||'application/octet-stream');res.end(await readFile(path));}catch{res.writeHead(404);res.end();}});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`;
-const browser=await chromium.launch({executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
+const browser=await chromium.launch({executablePath:process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
 try{
-const context=await browser.newContext({viewport:{width:1280,height:900},deviceScaleFactor:1});
+const context=await browser.newContext({viewport:{width:1280,height:900},deviceScaleFactor:1,colorScheme:'light'});
 await context.route('**/*',route=>route.request().url().startsWith(origin)?route.continue():route.abort());
 await context.addInitScript(()=>{
  const callbacks=new Map();const events=new Map();let id=0;
- const stores=[{number:'TEST1',name:'武汉',title:'Apple 武汉'},{number:'TEST2',name:'长沙',title:'Apple 长沙'}];
- const products=['星光白','夜空色'].map((color,i)=>({partNumber:`DEMO${i}`,category:'iphone',family:'iPhone Duo',capacity:'256GB',color,title:`iPhone Duo 256GB ${color}`}));
- const rows=stores.flatMap((s,j)=>products.map((p,i)=>({target:{locale:'zh_CN',storeNumber:s.number,storeTitle:s.title,partNumber:p.partNumber,productName:p.title},availability:i===0&&j===0?{kind:'in_stock'}:i===1&&j===1?{kind:'unknown',reason:'transport',detail:'演示：连接暂不可用'}:{kind:'out_of_stock'},lastCheckedMs:Date.now(),consecutiveFailures:0})));
- const settings={locale:'zh_CN',targets:rows.map(r=>r.target),intervalSeconds:30,barkUrl:'',feishuWebhook:'',proxies:[],soundEnabled:true,openBagOnHit:false};
+ const stores=['上海-环球港','上海-香港广场','上海-五角场','上海-上海环贸 iapm','上海-浦东','上海-静安','上海-南京东路'].map((title,i)=>({number:`TEST${i+1}`,name:title,title}));
+ const products=['星光白','夜空色'].map((color,i)=>({partNumber:`DEMO${i}`,category:'iphone',family:'iphoneduo',capacity:'1TB',color,title:`iPhone Duo 1TB ${color}`}));
+ const rows=new URLSearchParams(location.search).has('empty') ? [] : stores.map((s,j)=>{const p=products[j%2];return ({target:{locale:'zh_CN',storeNumber:s.number,storeTitle:s.title,partNumber:p.partNumber,productName:p.title},availability:j===0?{kind:'in_stock'}:j===3?{kind:'unknown',reason:'transport',detail:'演示：连接暂不可用'}:j===5?{kind:'unknown',reason:'not_yet_checked'}:{kind:'out_of_stock'},lastCheckedMs:Date.now(),consecutiveFailures:0});});
+ const settings={locale:'zh_CN',targets:rows.map(r=>r.target),intervalSeconds:60,barkUrl:'',feishuWebhook:'',proxies:['http://127.0.0.1:18001','http://127.0.0.1:18002'],soundEnabled:false,openBagOnHit:false};
  const plan={max_price:20000,quantity:1,applecare:'none',payment:'支付宝',financing:'official',installment_option:'微信分付',installment_months:24,pickup_dates:['2026-10-23'],clear_bag_before_purchase:true,auto_submit_order:false};
  const status={armed:false,busy:false,stopping:false,mode:'idle',stage:'idle',reason:'尚未启用自动选购',elapsed:0,plan,submissionEnabled:false};
- window.__UI_CALLS__=[];
- window.__TAURI_INTERNALS__={transformCallback(fn){callbacks.set(++id,fn);return id;},unregisterCallback(){},invoke:async(cmd,args)=>{
+ window.__UI_CALLS__=[]; window.__CHECKOUT_STATUS__=status;
+ window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener(_event,eventId){events.delete(eventId);}};
+ window.__TAURI_INTERNALS__={transformCallback(fn){callbacks.set(++id,fn);return id;},unregisterCallback(callbackId){callbacks.delete(callbackId);},invoke:async(cmd,args)=>{
  window.__UI_CALLS__.push({cmd,args});
- if(cmd==='plugin:event|listen'){events.set(args.event,args.handler);return ++id;}
+ if(cmd==='plugin:event|listen'){events.set(++id,{event:args.event,handler:args.handler});return id;}
+ if(cmd==='plugin:event|unlisten'){events.delete(args.eventId);return null;}
  const values={list_regions:[{locale:'zh_CN',title:'中国大陆'}],list_categories:[{value:'iphone',title:'iPhone'}],get_settings:settings,get_snapshot:rows,is_running:false,list_stores:stores,list_products:products};
  if(cmd in values)return values[cmd];
+ if(cmd==='get_community_status')return {running:false,lastCheckedMs:null,lastSignal:null,error:null,nextCheckInSecs:null};
  if(cmd==='save_settings'){Object.assign(settings,args.settings);return structuredClone(settings);}
- if(cmd==='checkout_command'){if(args.op==='configure')status.plan=args.payload.plan;return structuredClone(status);}
+ if(cmd==='checkout_command'){if(args.op==='configure')status.plan=args.payload.plan;if(args.op==='arm'){status.armed=true;status.reason='已启用，等待命中';}if(args.op==='stop'){status.armed=false;status.reason='已停止选购';}if(args.op!=='status')window.__EMIT__('checkout://status',structuredClone(status));return structuredClone(status);}
  return null;
  }};
- window.__EMIT__=(name,payload)=>callbacks.get(events.get(name))?.({event:name,payload});
+ window.__EMIT__=(name,payload)=>{for(const [eventId,listener] of events)if(listener.event===name)callbacks.get(listener.handler)?.({event:name,id:eventId,payload});};
 });
-const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(origin);await page.getByText('尚未启用自动选购',{exact:false}).waitFor();
-await page.evaluate(()=>window.__EMIT__('watcher://notice','界面演示数据，不代表实际库存。'));
-await page.screenshot({path:out+'/center.png',fullPage:true});
-for(const label of ['监控目标','选购方案','手机提醒']){await page.getByRole('button',{name:label,exact:true}).click();await page.screenshot({path:out+'/'+label+'.png',fullPage:true});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`${label} overflows`);}
-assert.equal(await page.locator('input:visible').count(),1);
+const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+await page.goto(origin);
+await page.getByRole('heading',{name:'关注的库存'}).waitFor();
+await page.getByRole('button',{name:'立即选购',exact:true}).waitFor();
+const noOverflow=async()=>assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'page must not overflow horizontally');
+const targets=page.getByRole('complementary',{name:'添加监控目标'});
+const inventory=page.getByTestId('inventory-page');
+const table=page.getByRole('region',{name:'监控型号与库存状态'});
+const targetBox=await targets.boundingBox(), tableBox=await inventory.boundingBox();
+assert.ok(targetBox.x+targetBox.width<tableBox.x,'target selection and inventory share a row');
+assert.ok(Math.abs(targetBox.y-tableBox.y)<2,'panels align at the top');
+assert.ok((await table.boundingBox()).height>=320,'inventory keeps its readable height');
+assert.equal(await page.getByRole('navigation').count(),0);
+assert.equal(await page.getByLabel('总预算（含保障）',{exact:false}).isVisible(),false);
+await noOverflow();
+await screenshot(page,'light.png',{fullPage:true});
+await page.emulateMedia({colorScheme:'dark'});
+await screenshot(page,'dark.png',{fullPage:true});
+await page.emulateMedia({colorScheme:'light'});
+
+// Multi-select a real combination from the isolated catalog; folding must keep it.
+async function pick(name,option){await page.getByRole('combobox',{name,exact:true}).click();await page.getByRole('option',{name:option,exact:true}).click();await page.keyboard.press('Escape');}
+await pick('选择机型','iPhone Duo');
+await pick('选择容量','1TB');
+await pick('选择颜色','星光白');
+await pick('选择自提门店','上海-环球港');
+assert.equal(await targets.getByRole('button',{name:'添加',exact:true}).isEnabled(),true);
+await page.getByRole('button',{name:'手机提醒',exact:true}).click();
 await page.getByLabel('Bark 链接地址').fill('https://api.day.app/DemoKey/title/body?group=demo');
-await page.getByRole('button',{name:'保存并测试提醒',exact:true}).click();await page.getByText('测试请求已发送，请查看手机通知').waitFor();
+await page.getByRole('button',{name:'收起设置',exact:true}).click();
+assert.equal(await page.getByLabel('Bark 链接地址').isVisible(),false);
+assert.equal(await targets.getByRole('button',{name:'添加',exact:true}).isEnabled(),true);
+await page.getByRole('button',{name:'手机提醒',exact:true}).click();
+assert.equal(await page.getByLabel('Bark 链接地址').inputValue(),'https://api.day.app/DemoKey/title/body?group=demo');
+await screenshot(page,'settings.png',{fullPage:true});
+await page.getByRole('button',{name:'保存并测试提醒',exact:true}).click();
+await page.getByText('测试请求已发送，请查看手机通知').waitFor();
 assert.equal(await page.getByLabel('Bark 链接地址').inputValue(),'https://api.day.app/DemoKey');
-await page.getByRole('button',{name:'选购方案',exact:true}).click();await page.getByRole('spinbutton',{name:'总预算（含保障）'}).fill('18000');
-await page.getByRole('button',{name:'捡漏中心',exact:true}).click();await page.getByRole('button',{name:'选购方案',exact:true}).click();assert.equal(await page.getByRole('spinbutton',{name:'总预算（含保障）'}).inputValue(),'18000','draft survives navigation');
-assert.equal(await page.evaluate(()=>window.__UI_CALLS__.some(c=>c.cmd==='checkout_command'&&c.args.op!=='status')),false,'navigation never saves/arms/submits');
-await page.getByRole('button',{name:'全款',exact:true}).click();assert.equal(await page.getByLabel('全款渠道').isEnabled(),true);await page.getByLabel('全款渠道').selectOption('微信支付');await page.screenshot({path:out+'/全款.png',fullPage:true});
-await page.getByRole('button',{name:'分期',exact:true}).click();assert.equal(await page.getByRole('button',{name:'24 期',exact:true,pressed:true}).count(),1);
-await page.getByRole('checkbox', {name:'自动下单，等待本人支付', exact:false}).check();
-page.on('dialog', () => { throw Error('native confirmation must not be used'); });
+await page.getByRole('button',{name:'收起设置',exact:true}).click();
+
+await page.getByRole('button',{name:'展开方案',exact:true}).click();
+await page.getByRole('spinbutton',{name:'总预算（含保障）'}).fill('18000');
+await page.getByLabel('名字',{exact:true}).fill('演示');
+await page.getByRole('button',{name:'收起方案',exact:true}).click();
+assert.equal(await page.getByLabel('名字',{exact:true}).isVisible(),false);
+await page.getByRole('button',{name:'展开方案',exact:true}).click();
+assert.equal(await page.getByRole('spinbutton',{name:'总预算（含保障）'}).inputValue(),'18000');
+assert.equal(await page.getByLabel('名字',{exact:true}).inputValue(),'演示');
+assert.equal(await page.evaluate(()=>window.__UI_CALLS__.some(c=>c.cmd==='checkout_command'&&c.args.op!=='status')),false,'folding never reads profiles, saves, arms or submits');
+await page.getByRole('button',{name:'全款',exact:true}).click();
+assert.equal(await page.getByLabel('全款渠道').isEnabled(),true);
+await page.getByLabel('全款渠道').selectOption('微信支付');
+await page.getByRole('button',{name:'分期',exact:true}).click();
+await page.emulateMedia({colorScheme:'dark'});
+const installments=page.getByRole('group',{name:'分期付款方案 · 点击期数即可设置'});
+assert.notEqual(await installments.locator('div').first().evaluate(e=>getComputedStyle(e).backgroundColor),'rgb(255, 255, 255)');
+await screenshot(installments,'dark-installments.png');
+await noOverflow();
+await page.emulateMedia({colorScheme:'light'});
+await page.getByRole('checkbox',{name:'自动下单，等待本人支付',exact:false}).check();
+page.on('dialog',()=>{throw Error('native confirmation must not be used');});
 await page.getByRole('button',{name:'启用有货自动选购',exact:true}).click();
 await page.getByRole('dialog').waitFor();
 await page.getByRole('button',{name:'取消',exact:true}).click();
@@ -54,6 +104,28 @@ await page.getByRole('button',{name:'启用有货自动选购',exact:true}).clic
 await page.getByRole('button',{name:'确认启用并授权下单',exact:true}).click();
 await page.getByRole('dialog').waitFor({state:'hidden'});
 assert.equal(await page.evaluate(()=>window.__UI_CALLS__.filter(c=>c.cmd==='checkout_command'&&c.args.op==='arm'&&c.args.payload.confirmSubmission===true).length),1);
-await page.setViewportSize({width:1000,height:640});for(const label of ['捡漏中心','监控目标','选购方案','手机提醒']){await page.getByRole('button',{name:label,exact:true}).click();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`${label} min-size overflow`);}
-await page.getByRole('button',{name:'捡漏中心',exact:true}).click();await page.screenshot({path:out+'/center-1000.png',fullPage:true});assert.deepEqual(errors,[]);console.log('UI preview passed: four pages, two window sizes, draft retention, in-app confirmation cancel/accept, mocked IPC only, no external requests.');
+await page.getByRole('button',{name:'收起方案',exact:true}).click();
+await page.evaluate(()=>window.__EMIT__('checkout://status',{...window.__CHECKOUT_STATUS__,armed:true,reason:'已启用，等待命中'}));
+await page.getByRole('button',{name:'停止选购',exact:true}).waitFor();
+assert.equal(await page.getByRole('button',{name:'停止选购',exact:true}).isVisible(),true,'stop stays accessible when the plan is collapsed');
+await page.evaluate(()=>window.__EMIT__('checkout://status',window.__CHECKOUT_STATUS__));
+
+await page.evaluate(()=>window.__EMIT__('watcher://notice','界面演示数据，不代表实际库存。'));
+await page.getByRole('button',{name:'查询日志',exact:true}).click();
+assert.equal(await page.getByRole('region',{name:'查询日志'}).isVisible(),true);
+await page.getByText('界面演示数据，不代表实际库存。',{exact:false}).waitFor();
+await page.getByRole('button',{name:'查询日志',exact:true}).click();
+for(const colorScheme of ['light','dark']){
+ await page.emulateMedia({colorScheme});
+ await page.setViewportSize({width:1000,height:640});
+ await noOverflow();assert.ok((await table.boundingBox()).height>=320);
+ await page.evaluate(()=>window.scrollTo(0,0));
+ await screenshot(page,`${colorScheme}-1000.png`,{fullPage:true});
+}
+await page.goto(origin+'/?empty=1');
+await page.getByText('从一个心仪的型号开始').waitFor();
+assert.equal(await page.getByRole('button',{name:'开始监测',exact:true}).isEnabled(),false);
+await screenshot(page,'empty.png',{fullPage:true});
+assert.deepEqual(errors,[]);
+console.log('UI preview passed: one-page layout, both themes, 1280/1000 widths, target/Bark/contact/plan draft retention, collapsed stop control, confirmation cancel/accept. Mocked IPC only; external requests blocked.');
 }finally{await browser.close();server.close();}

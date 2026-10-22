@@ -60,9 +60,13 @@ mod access_tests {
 
     #[test]
     fn only_explicit_access_denial_stops_monitoring() {
-        assert!(access_restricted(&json!({"accessBlocked":true, "stage":"BLOCKED"})));
+        assert!(access_restricted(
+            &json!({"accessBlocked":true, "stage":"BLOCKED"})
+        ));
         for stage in ["PRODUCT", "NOT_FOUND", "SOLD_OUT", "LOGIN", "UNKNOWN"] {
-            assert!(!access_restricted(&json!({"accessBlocked":false, "stage":stage})));
+            assert!(!access_restricted(
+                &json!({"accessBlocked":false, "stage":stage})
+            ));
         }
         assert!(!access_restricted(&json!({})));
     }

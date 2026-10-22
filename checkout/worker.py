@@ -31,7 +31,17 @@ SHARED_LOCK = application_data_root() / 'PurchaseAssistantPreview/service.lock'
 def plan_for_hit(plan, hit, now=None, *, rehearsal=False, manual=False):
     now = time.time() * 1000 if now is None else now
     stamp = hit.get('lastCheckedMs')
-    if not rehearsal and (hit.get('availability', {}).get('kind') != 'in_stock' or
+    if not rehearsal and hit.get('source') is not None:
+        # Explicit community evidence follows a separate freshness rule. It is
+        # never relabeled as confirmed inventory, and all plan/order gates below
+        # still run before the first browser action and again after preflight.
+        reported, received = hit.get('reportedAtMs'), hit.get('receivedAtMs')
+        if (hit.get('source') != 'sunbelife_aggregate' or manual or
+            hit.get('target', {}).get('locale') != 'zh_CN' or
+            type(reported) not in (int, float) or type(received) not in (int, float) or
+            not 0 <= now - reported <= 180000 or not 0 <= now - received <= 15000 or reported > received):
+            raise ValueError('共享到货线索无效或已过期；等待新的线索')
+    elif not rehearsal and (hit.get('availability', {}).get('kind') != 'in_stock' or
         (not manual and (type(stamp) not in (int, float) or not 0 <= now - stamp <= 15000))):
         raise ValueError('库存未知或已过期；等待新的有效查询')
     target, product = hit.get('target', {}), hit.get('product', {})
@@ -481,7 +491,7 @@ class Bridge:
             if op == 'offer':
                 if not self.armed or self.reserved or self.stopping:
                     return self.status()
-                # Only successful completed snapshots, in configured target order.
+                # Confirmed inventory or explicit community hints, in target order.
                 rejected = ''
                 for hit in message.get('hits', [])[:1000]:
                     t = hit.get('target', {})

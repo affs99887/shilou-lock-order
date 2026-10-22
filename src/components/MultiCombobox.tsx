@@ -65,6 +65,7 @@ export function MultiCombobox({
         <Button
           variant="outline"
           role="combobox"
+          aria-label={placeholder}
           aria-expanded={open}
           disabled={disabled}
           className={cn("bg-card justify-between font-normal", className)}

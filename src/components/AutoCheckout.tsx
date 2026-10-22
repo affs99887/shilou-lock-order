@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronUp, LockKeyhole } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,7 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
   const [selected, setSelected] = useState("");
   const [confirmation, setConfirmation] = useState<"arm" | "manual" | "acknowledge_order" | null>(null);
   const dirty = useRef(false);
+  const showPlan = expanded ?? open;
   const locked = pending || !!status?.busy || !!status?.armed || !!status?.stopping;
   const needsAttention = ["attention", "manual_region"].includes(status?.mode || "");
   const locale=String(plan?.checkout_locale||'zh_CN');
@@ -82,13 +84,20 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
     } catch (e) { setError(String(e)); }
     finally { setPending(false); }
   }
-  return <section className="checkout-panel shrink-0 rounded-xl border bg-card p-5 text-sm">
-    <div className="checkout-heading"><div><span className="eyebrow">有货之后，按你的方案继续</span><h2>自动选购与锁单</h2></div><button className="text-primary font-medium" aria-expanded={expanded ?? open} onClick={() => onSettings ? onSettings() : setOpen(!open)}>{(expanded ?? open) ? "返回捡漏中心" : "设置选购方案 →"}</button></div>
+  return <section className={`checkout-panel compact-checkout shrink-0 rounded-xl border bg-card text-sm ${showPlan ? "checkout-expanded" : ""}`}>
+    <div className="checkout-heading">
+      <h2><LockKeyhole size={16} /> 选购方案</h2>
+      <div className="flex items-center gap-3">
+        <Button size="sm" variant="outline" hidden={!showPlan && !status?.busy && !status?.armed && !status?.stopping} disabled={pending} onClick={() => void command("stop")}>停止选购</Button>
+        <button type="button" className="panel-toggle" aria-expanded={showPlan} aria-controls="purchase-plan" onClick={() => onSettings ? onSettings() : setOpen(!open)}>{showPlan ? "收起方案" : "展开方案"}{showPlan ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</button>
+      </div>
+    </div>
     <div className="checkout-status-grid">
       <div data-testid="checkout-execution-status"><span>自动选购</span><strong>{status?.stopping ? "停止中" : status?.activationPending ? "正在校验资料" : needsAttention ? "已暂停，需要处理" : status?.mode === "awaiting_payment" ? "订单待支付" : status?.mode === "submitting" ? "正在核对下单结果" : status?.mode === "ready" ? "已到订单核对页" : status?.busy ? (status.manualRun ? "手动选购执行中" : "正在执行") : status?.armed ? "已启用，等待命中" : "未启用"}</strong></div>
       <div data-testid="submission-status"><span>实际下单权限</span><strong>{status?.submissionEnabled ? "已授权自动下单" : "停在提交前"}</strong></div>
       <div><span>付款方案</span><strong>{!plan ? "读取中…" : plan.financing === "official" ? `${plan.installment_option || "未选渠道"} · ${plan.installment_months || "—"} 期` : plan.financing === "manual" ? "官网手动选择" : `${plan.payment} · 全款`}</strong></div>
     </div>
+    <div hidden={!showPlan}>
     {plan && <p className="mt-3 rounded-lg bg-muted p-3" data-testid="pickup-rule-summary"><strong>取货规则：</strong>{pickupSummary}</p>}
     <label className="mt-3 flex flex-wrap items-center gap-2">选购目标<select aria-label="选购目标" className="max-w-lg rounded border bg-background text-foreground p-2" value={selected} onChange={e => setSelected(e.target.value)}><option value="">本地区列表第一项</option>{localTargets.map(t => <option key={targetKey(t)} value={targetKey(t)}>{t.storeTitle} · {t.productName}</option>)}</select></label>
     <div className="checkout-actions flex flex-wrap items-center gap-2">
@@ -96,11 +105,11 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
       <Button size="sm" disabled={pending || !!status?.busy || !!status?.stopping || !localTargets.length || !plan || foreign} title="不等监控：按所选目标的型号直接开始选购；指定门店不能取货时改选同城能取货的门店" onClick={() => void command("manual")}>手动开始选购</Button>
       <Button size="sm" variant="secondary" disabled={pending || !!status?.busy || !!status?.stopping || !localTargets.length || !plan} onClick={() => void command("rehearse")}>测试演练</Button>
       <Button size="sm" variant="outline" disabled={pending || !status?.busy || status.stopping || status.mode === "ready"} onClick={() => void command("continue")}>人工处理后继续</Button>
-      <Button size="sm" variant="outline" disabled={pending} onClick={() => void command("stop")}>停止选购</Button>
       <Button size="sm" variant="outline" disabled={locked || foreign} title="打开 Apple 账号页，在弹出的浏览器窗口登录；登录确认后自动结束，不加购" onClick={() => void command("login")}>{status?.loginTask ? "等待登录…" : "登录 Apple 账户"}</Button>
     </div>
     <p className="mt-2 text-muted-foreground" data-testid="checkout-session">账号登录：{status?.session || "尚未检查。开售前请先点「登录 Apple 账户」登录好，结账时少一步。"}</p>
-    {(!plan || !localTargets.length || locked) && <p className="mt-2 text-muted-foreground" data-testid="checkout-disabled-reason">{pending ? "正在处理，请稍候…" : status?.stopping ? "正在停止，完成后可重新启用。" : needsAttention ? "当前选购已暂停，新库存不会另开订单。请按下方原因处理后继续；若官网窗口已关闭，请先停止选购，再重新启用。" : status?.busy ? "选购正在执行；如需重新启用，请先停止选购。" : status?.armed ? "自动选购已启用；修改方案或重新启用前，请先停止选购。" : !plan ? "选购组件尚未就绪；连接失败时请重启软件后重试。" : "请先在捡漏中心添加至少一个监控目标（与选购地区一致）。"}</p>}
+    {(!plan || !localTargets.length || locked) && <p className="mt-2 text-muted-foreground" data-testid="checkout-disabled-reason">{pending ? "正在处理，请稍候…" : status?.stopping ? "正在停止，完成后可重新启用。" : needsAttention ? "当前选购已暂停，新库存不会另开订单。请按下方原因处理后继续；若官网窗口已关闭，请先停止选购，再重新启用。" : status?.busy ? "选购正在执行；如需重新启用，请先停止选购。" : status?.armed ? "自动选购已启用；修改方案或重新启用前，请先停止选购。" : !plan ? "选购组件尚未就绪；连接失败时请重启软件后重试。" : "请先在左侧添加至少一个监控目标（与选购地区一致）。"}</p>}
+    </div>
     <Dialog open={confirmation !== null} onOpenChange={value => { if (!value) setConfirmation(null); }}>
       <DialogContent>
         <DialogHeader>
@@ -114,12 +123,12 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
       </DialogContent>
     </Dialog>
     {status?.intervention && <div className="mt-3 rounded-xl border border-amber-400 bg-amber-50 p-4 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" role="alert" aria-live="assertive" data-testid="checkout-intervention"><strong>{status.intervention.title}</strong><p className="mt-1">{status.intervention.body}</p><p className="mt-2 text-xs">软件同时向已配置的 Bark 发送提醒；若未收到，请检查手机提醒设置。请在 Apple 官网本人处理，提醒不代表已付款或已锁单。</p></div>}
-    <p className="mt-2" role="status">{status?.stopping ? "正在停止，等待当前操作返回…" : `${status?.armed && !status.busy ? "已启用 · " : ""}${status?.reason || "正在连接选购组件…"}`}{status?.elapsed ? ` · ${status.elapsed.toFixed(1)} 秒` : ""}</p>
+    <p className="mt-2 text-muted-foreground" hidden={!showPlan && !status?.busy && !status?.armed && !status?.stopping && !!status && !status.error} role="status">{status?.stopping ? "正在停止，等待当前操作返回…" : `${status?.armed && !status.busy ? "已启用 · " : ""}${status?.reason || "正在连接选购组件…"}`}{status?.elapsed ? ` · ${status.elapsed.toFixed(1)} 秒` : ""}</p>
     {(error || status?.error) && <p className="mt-1 text-destructive" role="alert">{error || status?.error}</p>}
     {status?.profileRequired && <div className="mt-2 rounded border border-amber-500 p-3" role="alert"><strong>请先填写并保存联系与收货资料。</strong><Button variant="outline" size="sm" disabled={locked} onClick={() => !(expanded ?? open) && onSettings ? onSettings() : setOpen(true)}>填写收货资料</Button></div>}
     {status?.orderNeedsReview && <div className="mt-2 rounded border border-amber-500 p-2">已有下单记录。先在 Apple 核对订单，停止选购后才能清除此保护。<Button variant="outline" size="sm" disabled={locked} onClick={() => void command("acknowledge_order")}>已核对订单，允许新选购</Button></div>}
-    <p className="section-note">测试演练无需开启监测或提前加购；按所选目标在官网验证，始终停在提交前。正式选购先开启监测，再启用自动选购。监控出问题时可点「手动开始选购」：不等监控，按所选目标的型号直接开始；指定门店不能取货时改选同城能取货的门店，是否自动下单按方案设置。</p>
-    {(expanded ?? open) && plan && <div className="plan-fields mt-5 grid gap-5 border-t pt-5">
+    <p className="section-note" hidden={!showPlan}>测试演练无需开启监测或提前加购；按所选目标在官网验证，始终停在提交前。正式选购先开启监测，再启用自动选购。监控出问题时可点「手动开始选购」：不等监控，按所选目标的型号直接开始；指定门店不能取货时改选同城能取货的门店，是否自动下单按方案设置。</p>
+    {plan && <div id="purchase-plan" hidden={!showPlan} className="plan-fields mt-5 grid gap-5 border-t pt-5">
       <label className="font-semibold">选购国家／地区<select aria-label="选购国家／地区" className="block rounded border bg-background text-foreground p-2 mt-2" disabled={locked} value={locale} onChange={e=>{setSelected('');edit({checkout_locale:e.target.value,max_price:0,auto_submit_order:false,financing:e.target.value==='zh_CN'?'full':'manual',payment:e.target.value==='zh_CN'?'支付宝':'官网手动选择',installment_option:'',installment_months:0});}}>{checkoutRegions.map(r=><option key={r.locale} value={r.locale}>{r.title} · {r.currency}</option>)}</select></label>
       {foreign&&<p role="status" className="rounded-xl bg-amber-50 p-3 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">国际选购候选适配 · 尚未完成当地官网全流程验收。仅处理本地区监控目标；银行卡、付款、分期及最终下单由本人完成，不承诺待支付锁单。请重新设置当地货币预算及资料。</p>}
       <ContactProfile key={locale} locale={locale} locked={locked} beforeSave={async()=>{await invoke("checkout_command",{op:"configure",payload:{plan}});dirty.current=false;}} />

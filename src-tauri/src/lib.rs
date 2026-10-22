@@ -26,9 +26,9 @@ use tauri_plugin_updater::UpdaterExt;
 mod auto_open;
 mod checkout;
 mod checkout_hits;
-mod monitor_alert;
-mod notification_queue;
+mod community;
 mod monitor_policy;
+mod notification_queue;
 
 use auto_open::AutoOpenBag;
 
@@ -62,8 +62,7 @@ struct CategoryDto {
 struct AppState {
     checkout: checkout::Checkout,
     watcher: Watcher,
-    /// 和引擎共用的 Apple 客户端句柄，改代理设置时用它换线路，不用重启。
-    client: AppleClient,
+    community: community::Community,
     catalog: Catalog,
     http: reqwest::Client,
     /// 设置的内存副本。写盘失败不该让界面卡住，所以内存副本是权威的展示来源。
@@ -155,34 +154,29 @@ fn get_settings(state: tauri::State<'_, AppState>) -> Settings {
 }
 
 #[tauri::command]
+fn get_community_status(state: tauri::State<'_, AppState>) -> community::Status {
+    state.community.snapshot()
+}
+
+#[tauri::command]
 async fn save_settings(
     state: tauri::State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
     let mut next = settings;
-    next.normalize();
-    // 先规范化再套间隔策略：能不能用 5 秒间隔，要看去掉坏地址之后还有没有代理。
     monitor_policy::apply(&mut next);
+    next.normalize();
     state.catalog.attach_companions(&mut next.targets);
     state.catalog.attach_locations(&mut next.targets);
 
-    let previous = state.settings_snapshot();
-    if next.targets != previous.targets && state.checkout.engaged() {
+    if next.targets != state.settings_snapshot().targets && state.checkout.engaged() {
         return Err("请先停止自动选购，再修改监控目标；当前结账目标不会中途改变".into());
     }
 
-    // 代理变了就换线路，立即生效；地址解析不了就把错误报回界面，什么都不改。
-    // 必须先于改间隔：换线路失败时，不能让 5 秒的间隔落到本机直连上。
-    if next.proxies != previous.proxies || next.proxy_mode != previous.proxy_mode {
-        state
-            .client
-            .set_proxies(&next.proxies, next.proxy_mode)
-            .await
-            .map_err(|e| format!("代理设置未生效：{e}"))?;
-    }
     // 设置里的目标列表和查询间隔要同步给引擎，否则改完设置监控还按旧的跑。
     state.watcher.set_targets(next.targets.clone()).await;
     state.watcher.set_interval(next.interval()).await;
+    state.community.set_targets(&next.targets);
 
     state.put_settings(next.clone())?;
     Ok(next)
@@ -222,6 +216,7 @@ async fn set_targets(
     state.catalog.attach_companions(&mut targets);
     state.catalog.attach_locations(&mut targets);
     state.watcher.set_targets(targets.clone()).await;
+    state.community.set_targets(&targets);
     let mut next = state.settings_snapshot();
     next.targets = targets;
     state.put_settings(next)?;
@@ -230,12 +225,11 @@ async fn set_targets(
 
 #[tauri::command]
 async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result<u64, String> {
-    // 只有隧道代理模式能调快，其余情况一律一分钟，见 monitor_policy。
-    let mut next = state.settings_snapshot();
-    next.interval_seconds = seconds;
-    monitor_policy::apply(&mut next);
-    let secs = next.interval_seconds;
+    let _ = seconds;
+    let secs = monitor_policy::INTERVAL_SECONDS;
     state.watcher.set_interval(Duration::from_secs(secs)).await;
+    let mut next = state.settings_snapshot();
+    next.interval_seconds = secs;
     state.put_settings(next)?;
     Ok(secs)
 }
@@ -243,17 +237,23 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
 #[tauri::command]
 async fn start_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let status = tauri::async_runtime::spawn_blocking(move || {
-        app.state::<AppState>().checkout.request(serde_json::json!({"op":"status"}))
-    }).await.map_err(|_| "无法核对选购状态")??;
+        app.state::<AppState>()
+            .checkout
+            .request(serde_json::json!({"op":"status"}))
+    })
+    .await
+    .map_err(|_| "无法核对选购状态")??;
     if checkout::access_restricted(&status) {
         return Err("选购请求被 Apple 拒绝；请在限制解除后完成测试演练，再恢复监控。".into());
     }
     state.watcher.start().await;
+    state.community.set_running(true);
     Ok(())
 }
 
 #[tauri::command]
 async fn stop_watching(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.community.set_running(false);
     state.checkout.stop_if_started();
     state.watcher.stop().await;
     Ok(())
@@ -380,14 +380,14 @@ async fn checkout_command(
         return Err("参数格式错误".into());
     }
     message["op"] = serde_json::json!(op);
-    // 演练和手动开始都不看监控结果，只带上目标门店和商品；有没有货由官网页面决定。
     if op == "rehearse" || op == "manual" {
         let state = app.state::<AppState>();
         let key = message["targetKey"]
             .as_str()
             .ok_or("请选择监控列表中的一个目标")?;
         let settings = state.settings_snapshot();
-        let target = settings.targets
+        let target = settings
+            .targets
             .iter()
             .find(|t| t.key().0 == key)
             .ok_or("目标已变更，请重新选择")?;
@@ -408,7 +408,8 @@ async fn checkout_command(
         let snapshot = state.watcher.snapshot().await;
         // Preserve the real observation. An explicit manual selection is
         // checked against the official product page, without inventing a hit.
-        message["hit"] = checkout_hits::for_manual(key, &settings.targets, &snapshot, &state.catalog)?;
+        message["hit"] =
+            checkout_hits::for_manual(key, &settings.targets, &snapshot, &state.catalog)?;
     }
     tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().checkout.request(message))
         .await
@@ -477,12 +478,9 @@ fn emit_system_notification(app: &AppHandle, n: &Notification) {
     }
 }
 
-/// 消费引擎事件：转发给前端，并在有货时发提醒；监控连续查不到结果时也提醒。
+/// 消费引擎事件：转发给前端，并在有货时发提醒。
 async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Event>) {
     let mut auto_open_bag = AutoOpenBag::default();
-    let mut failure_alert = monitor_alert::FailureAlert::default();
-    // 最近一条告警原因，查不到结果时写进提醒里，让人知道该查代理还是网络。
-    let mut last_trouble: Option<String> = None;
     let (notifications, pending) = notification_queue::channel();
     let notification_app = app.clone();
     tauri::async_runtime::spawn(notification_queue::run(pending, move |notification| {
@@ -499,8 +497,7 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
         // 中间少一层可能出错的翻译。
         let _ = app.emit(EVENT_CHANNEL, &event);
 
-        if let Event::CycleComplete { .. } = &event
-        {
+        if let Event::CycleComplete { .. } = &event {
             let state = app.state::<AppState>();
             let settings = state.settings_snapshot();
             let hits = checkout_hits::for_event(&event, &settings.targets, &state.catalog);
@@ -516,57 +513,8 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             }
         }
 
-        if let Event::Trouble { reason, .. } = &event {
-            last_trouble = Some(reason.clone());
-        }
-
-        if let Event::CycleComplete { snapshot, .. } = &event {
-            // 有货、无货都算拿到了结果；Apple 回了「暂未开放到店取货」也算，那是开售前
-            // 的正常状态。一个都没有才是这一轮什么也没查到。
-            let answered = snapshot.is_empty()
-                || snapshot
-                    .iter()
-                    .any(|s| !s.availability.is_unknown() || s.availability.is_pickup_not_open());
-            if let Some(alert) = failure_alert.on_cycle(answered, std::time::Instant::now()) {
-                // 标题都带「有货」二字：飞书机器人开了关键词校验时，不含关键词的消息会被拒收。
-                let notification = match alert {
-                    monitor_alert::Alert::Failing => {
-                        let reason: String = last_trouble
-                            .clone()
-                            .or_else(|| {
-                                snapshot
-                                    .iter()
-                                    .find_map(|s| s.availability.describe_reason())
-                            })
-                            .unwrap_or_default()
-                            .chars()
-                            .take(200)
-                            .collect();
-                        Notification::new(
-                            "监控受阻，可能错过有货",
-                            format!(
-                                "已连续 {} 分钟查不到库存结果，请检查代理或网络。{reason}",
-                                monitor_alert::FAILING_AFTER.as_secs() / 60
-                            ),
-                        )
-                    }
-                    monitor_alert::Alert::Recovered => {
-                        Notification::new("库存监控已恢复，有货会照常提醒", "重新查到了库存结果")
-                    }
-                };
-                if notifications.send(notification).await.is_err() {
-                    let _ = app.emit(NOTICE_CHANNEL, "提醒发送任务已停止，无法发送监控异常提醒");
-                }
-            }
-            if answered {
-                last_trouble = None;
-            }
-        }
-
         if let Event::RunStateChanged { running } = &event {
             auto_open_bag.on_run_state_changed(*running);
-            failure_alert.on_run_state_changed();
-            last_trouble = None;
         }
 
         if let Event::InStock { state } = &event {
@@ -589,15 +537,21 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             let _ = auto_open_bag.open_if_needed(
                 settings.open_bag_on_hit && !checkout_engaged(&app).await,
                 &target.locale,
-                |_| { open_requested = true; Ok::<_, ()>(()) },
+                |_| {
+                    open_requested = true;
+                    Ok::<_, ()>(())
+                },
             );
             if open_requested {
                 let handle = app.clone();
                 let locale = target.locale.clone();
                 let result = tauri::async_runtime::spawn_blocking(move || {
-                    handle.state::<AppState>().checkout.request(
-                        serde_json::json!({"op":"open_bag_if_idle","locale":locale}))
-                }).await;
+                    handle
+                        .state::<AppState>()
+                        .checkout
+                        .request(serde_json::json!({"op":"open_bag_if_idle","locale":locale}))
+                })
+                .await;
                 if let Ok(Err(err)) = result {
                     let _ = app.emit(NOTICE_CHANNEL, format!("打开购物袋失败：{err}"));
                 }
@@ -782,21 +736,22 @@ pub fn run() {
             catalog.attach_companions(&mut settings.targets);
             catalog.attach_locations(&mut settings.targets);
 
-            let client = AppleClient::new(ClientConfig {
-                proxies: settings.proxies.clone(),
-                proxy_mode: settings.proxy_mode,
-                ..ClientConfig::default()
-            })
-            .map_err(|e| format!("构造 Apple 客户端失败：{e}"))?;
+            // Desktop monitoring uses the original main-branch scheduler and
+            // current system network. Saved legacy proxy addresses are not used.
+            let client = AppleClient::new(ClientConfig::default())
+                .map_err(|e| format!("构造 Apple 客户端失败：{e}"))?;
 
             // 用 Watcher::new 而不是 Watcher::spawn：setup 回调跑在主线程上，
             // 并不处在 tokio 运行时上下文里，在这里 tokio::spawn 会 panic，
             // 而且因为发生在不可展开的回调中，进程会直接 abort。
             // 引擎任务交给 Tauri 自己的运行时去驱动。
-            let (watcher, events, engine) = Watcher::new(client.clone(), WatcherConfig {
-                interval: Duration::from_secs(monitor_policy::INTERVAL_SECONDS),
-                ..WatcherConfig::default()
-            });
+            let (watcher, events, engine) = Watcher::new(
+                client.clone(),
+                WatcherConfig {
+                    interval: Duration::from_secs(monitor_policy::INTERVAL_SECONDS),
+                    ..WatcherConfig::default()
+                },
+            );
             tauri::async_runtime::spawn(engine);
 
             {
@@ -809,6 +764,9 @@ pub fn run() {
                 });
             }
 
+            let (community, community_control) =
+                community::Community::new(settings.targets.clone());
+            let community_client = apw_core::community::Client::new()?;
             app.manage(AppState {
                 checkout: checkout::Checkout::new(app.path().resource_dir()?.join(
                     if cfg!(target_os = "windows") {
@@ -820,7 +778,7 @@ pub fn run() {
                     },
                 )),
                 watcher,
-                client,
+                community,
                 catalog,
                 http: reqwest::Client::new(),
                 settings: RwLock::new(settings),
@@ -828,6 +786,11 @@ pub fn run() {
             });
 
             let handle: AppHandle = app.handle().clone();
+            tauri::async_runtime::spawn(community::run(
+                handle.clone(),
+                community_control,
+                community_client,
+            ));
             tauri::async_runtime::spawn(pump_events(handle.clone(), events));
             let checkout_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -862,10 +825,13 @@ pub fn run() {
                         let _ = checkout_handle.emit("checkout://status", &status);
                         if checkout::access_restricted(&status) {
                             let state = checkout_handle.state::<AppState>();
+                            state.community.set_running(false);
                             if state.watcher.is_running().await {
                                 state.watcher.stop().await;
-                                let _ = checkout_handle.emit(NOTICE_CHANNEL,
-                                    "官网拒绝选购请求，库存监控已同步停止；请核对官网现场。");
+                                let _ = checkout_handle.emit(
+                                    NOTICE_CHANNEL,
+                                    "官网拒绝选购请求，库存监控已同步停止；请核对官网现场。",
+                                );
                             }
                         }
                         let notice = &status["notice"];
@@ -921,6 +887,7 @@ pub fn run() {
             list_products,
             refresh_products,
             get_settings,
+            get_community_status,
             save_settings,
             set_push_urls,
             get_snapshot,

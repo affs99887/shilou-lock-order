@@ -21,6 +21,7 @@ function renderApp() {
     if (specifier === "@/lib/inventory-purchase") return { useInventoryPurchase: () => purchase };
     if (specifier === "react") return {
       useEffect() {},
+      useRef: () => ({ current: null }),
       useMemo: (compute) => compute(),
       useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
       useState(initial) {
@@ -195,7 +196,6 @@ test("inventory omits check times while query logs keep their timestamps and rec
   assert.ok(layout.className.split(" ").includes("min-h-screen"));
   assert.ok(!layout.className.split(" ").includes("h-screen"));
   const table = app.control(e => e.props?.["aria-label"] === "监控型号与库存状态");
-  assert.ok(table.className.includes("h-[clamp(20rem,40vh,40rem)]"));
   assert.ok(table.className.includes("shrink-0"));
   assert.ok(!table.className.includes("min-h-0"));
   assert.equal(app.all(e => e.type === "TableHead" && e.props.children === "最后检查").length, 0);
@@ -206,37 +206,42 @@ test("inventory omits check times while query logs keep their timestamps and rec
   assert.equal(app.all(e => e.type === "AutoCheckout").length, 1);
 });
 
-test("navigation keeps original controls mounted and preserves target draft", () => {
+test("folding secondary settings preserves drafts and keeps targets beside inventory", () => {
   const app = renderApp();
-  const nav = label => app.control(e => e.type === "button" && e.props.children?.[1]?.props?.children === label);
-  assert.equal(app.control(e => e.props?.["data-testid"] === "inventory-page").hidden, false);
-  nav("监控目标").onClick();
+  const settings = () => app.control(e => e.props?.["aria-controls"] === "notification-settings");
+  const checkout = () => app.control(e => e.type === "AutoCheckout");
+  assert.notEqual(app.control(e => e.props?.["data-testid"] === "inventory-page").hidden, true);
+  assert.notEqual(app.control(e => e.props?.["data-testid"] === "target-page").hidden, true);
   app.choice("选择自提门店").onChange(["R575"]);
-  nav("手机提醒").onClick();
-  nav("监控目标").onClick();
+  settings().onClick();
+  assert.equal(app.control(e => e.props?.id === "notification-settings").hidden, false);
+  settings().onClick();
+  assert.equal(app.control(e => e.props?.id === "notification-settings").hidden, true);
   assert.deepEqual(app.choice("选择自提门店").values, ["R575"]);
-  assert.equal(app.control(e => e.props?.["data-testid"] === "target-page").hidden, false);
-  nav("选购方案").onClick();
-  assert.equal(app.control(e => e.type === "AutoCheckout").expanded, true);
-  nav("捡漏中心").onClick();
-  assert.equal(app.control(e => e.type === "AutoCheckout").expanded, false);
+  checkout().onSettings();
+  assert.equal(checkout().expanded, true);
+  checkout().onSettings();
+  assert.equal(checkout().expanded, false);
   assert.equal(app.all(e => e.type === "AutoCheckout").length, 1);
+  assert.equal(app.all(e => e.type === "BarkSettings").length, 1);
+  assert.equal(app.all(e => e.type === "ProxySettings").length, 0);
+  assert.equal(app.all(e => e.type === "MonitorSources").length, 0);
   assert.deepEqual(app.saved, []);
   assert.deepEqual(app.addedTargets, []);
 });
 
-test("settings page carries proxy lines and the blocked hint follows the proxy mode", () => {
+test("monitoring uses the original cooldown guidance even with saved legacy proxies", () => {
   const app = renderApp();
   const settingsPage = app.control(e => e.props?.["data-testid"] === "settings-page");
-  assert.ok([settingsPage.children].flat().some(e => e?.type === "ProxySettings"));
+  assert.ok(![settingsPage.children].flat().some(e => e?.type === "ProxySettings"));
   const hint = () => app.all(e => e.type === "p" && typeof e.props.children === "string" &&
     e.props.children.startsWith("受影响的库存状态为未知。"))[0].props.children;
   app.state.trouble = { reason: "查询失败：HTTP 541", advice: "try_another_network" };
   assert.match(hint(), /等待冷却结束/);
   app.state.settings = { ...app.state.settings, proxies: ["http://127.0.0.1:18001"], proxyMode: "pool" };
-  assert.match(hint(), /被拦的代理会暂停 5～30 分钟，其余代理继续查询/);
+  assert.match(hint(), /等待冷却结束/);
   app.state.settings = { ...app.state.settings, proxies: ["http://user:pass@tunnel.example:15818"], proxyMode: "tunnel" };
-  assert.match(hint(), /换新的出口 IP/);
+  assert.match(hint(), /等待冷却结束/);
   app.state.settings = { ...app.state.settings, proxies: [], proxyMode: "tunnel" };
   assert.match(hint(), /等待冷却结束/, "没有代理时模式不起作用");
 });

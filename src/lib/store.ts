@@ -16,6 +16,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Category,
   CategoryOption,
+  CommunityStatus,
   Product,
   Region,
   Settings,
@@ -33,6 +34,7 @@ const NOTICE_CHANNEL = "watcher://notice";
 const MAX_LOG_LINES = 300;
 
 export interface UiState {
+  community: CommunityStatus | null;
   rows: TargetState[];
   running: boolean;
   /** 非 null 表示「当前的状态不可信」，界面要挂一条持续可见的告警。 */
@@ -74,10 +76,10 @@ const DEFAULT_SETTINGS: Settings = {
   soundEnabled: false,
   openBagOnHit: true,
   proxies: [],
-  proxyMode: "mixed",
 };
 
 let state: UiState = {
+  community: null,
   rows: [],
   running: false,
   trouble: null,
@@ -183,6 +185,16 @@ function applyEvent(event: WatcherEvent): void {
 let unlisteners: UnlistenFn[] = [];
 let starting: Promise<void> | null = null;
 
+function applyCommunityStatus(community: CommunityStatus): void {
+  const previous = state.community;
+  update({ community });
+  if (community.error && community.error !== previous?.error) {
+    pushLog(`共享线索：${community.error}`);
+  } else if (!community.error && previous?.error) {
+    pushLog("共享线索连接已恢复。");
+  }
+}
+
 /**
  * 连接后端。重复调用是安全的。
  *
@@ -193,10 +205,15 @@ let starting: Promise<void> | null = null;
 export function connect(): Promise<void> {
   if (starting) return starting;
   starting = (async () => {
+    let communityEventReceived = false;
     unlisteners = await Promise.all([
       listen<WatcherEvent>(EVENT_CHANNEL, (e) => applyEvent(e.payload)),
       // 这条通道不只在启动时用：发提醒失败、打开购物袋失败也走这里，前缀不能写死成「启动」。
       listen<string>(NOTICE_CHANNEL, (e) => pushLog(`提示：${e.payload}`)),
+      listen<CommunityStatus>("community://status", (e) => {
+        communityEventReceived = true;
+        applyCommunityStatus(e.payload);
+      }),
     ]);
 
     const [regions, categories, settings, rows, running] = await Promise.all([
@@ -207,6 +224,9 @@ export function connect(): Promise<void> {
       invoke<boolean>("is_running"),
     ]);
     update({ regions, categories, settings, rows, running, ready: true });
+    void invoke<CommunityStatus>("get_community_status").then(community => {
+      if (!communityEventReceived) applyCommunityStatus(community);
+    }).catch(() => {});
     await loadCatalog(settings.locale);
     // 启动时静默查一次。查不到就算了，不打扰用户 —— 网络不通、GitHub 抽风
     // 都会走到这里，跟「有没有新版本」是两回事。
@@ -286,25 +306,6 @@ export async function saveBarkAddress(barkUrl: string): Promise<void> {
     update({ settings: saved });
   } catch (err) {
     pushLog("Bark 地址保存失败，未发送测试提醒。");
-    throw err;
-  }
-}
-
-/**
- * 保存代理线路与查询间隔，返回后端实际存下的设置。
- *
- * 失败时抛出，让设置面板把原因显示出来：代理没生效时界面不能显示「已保存」。
- * 间隔由后端按规则收敛（只有不走本机网络的两种模式能低于 60 秒），以返回值为准。
- */
-export async function saveProxySettings(
-  patch: Pick<Settings, "proxies" | "proxyMode" | "intervalSeconds">,
-): Promise<Settings> {
-  try {
-    const saved = await invoke<Settings>("save_settings", { settings: { ...state.settings, ...patch } });
-    update({ settings: saved });
-    return saved;
-  } catch (err) {
-    pushLog(`代理设置保存失败：${String(err)}`);
     throw err;
   }
 }

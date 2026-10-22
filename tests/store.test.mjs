@@ -39,7 +39,8 @@ function setup() {
     };
   });
   return { ...store, snapshot: store.watcherStore.getSnapshot, calls, handlers,
-    emit: payload => events.get("watcher://event")({ payload }) };
+    emit: payload => events.get("watcher://event")({ payload }),
+    emitCommunity: payload => events.get("community://status")({ payload }) };
 }
 
 async function monitoringApp() {
@@ -52,6 +53,40 @@ async function monitoringApp() {
   await app.connect();
   return app;
 }
+
+test("shared hints and failures stay in logs without replacing official inventory", async () => {
+  const app = await monitoringApp();
+  const row = { target: { storeTitle: "示例门店", productName: "示例型号" },
+    availability: { kind: "unknown", reason: "blocked" } };
+  app.emit({ type: "cycleComplete", healthy: false, snapshot: [row], nextCheckInSecs: 60, paced: false });
+  const hint = { running: true, lastSignal: { target: row.target, source: "sunbelife_aggregate" }, error: null };
+  app.emitCommunity(hint);
+  app.emitCommunity({ ...hint, error: "共享接口暂时不可用" });
+  app.emitCommunity({ ...hint, error: "共享接口暂时不可用" });
+  assert.deepEqual(app.snapshot().rows, [row]);
+  assert.equal(app.snapshot().logs.filter(line => line.includes("共享接口暂时不可用")).length, 1);
+  app.emitCommunity(hint);
+  assert.match(app.snapshot().logs.at(-1), /共享线索连接已恢复/);
+  app.disconnect();
+});
+
+test("a delayed shared-status snapshot cannot overwrite a newer background event", async () => {
+  const app = setup();
+  const pending = deferred();
+  Object.assign(app.handlers, {
+    list_regions: () => [], list_categories: () => [], get_snapshot: () => [],
+    get_settings: () => app.snapshot().settings, is_running: () => false,
+    check_for_update: () => null, get_community_status: () => pending.promise,
+  });
+  await app.connect();
+  const current = { running: true, error: "连接暂不可用", lastCheckedMs: 20 };
+  app.emitCommunity(current);
+  pending.resolve({ running: false, error: null, lastCheckedMs: 10 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(app.snapshot().community, current);
+  assert.ok(!app.snapshot().logs.some(line => line.includes("共享线索连接已恢复")));
+  app.disconnect();
+});
 
 test("blocked events preserve the cause, cooldown and unknown stock until a healthy cycle", async () => {
   const app = await monitoringApp();

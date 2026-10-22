@@ -14,6 +14,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 rand.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 wreq = { version = "0.16", default-features = false, features = ["cookies", "gzip", "brotli", "query", "stream", "webpki-roots", "tokio-rt", "socks"], optional = true }
 wreq-util = { version = "0.2", default-features = false, features = ["emulation"], optional = true }
 # 抓 Mac 配置页时并发几页；也是 chrome-tls 传输层的依赖。

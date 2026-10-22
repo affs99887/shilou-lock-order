@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   AlertTriangle,
   ChevronDown,
@@ -12,13 +12,11 @@ import {
   X,
   Radar,
   SlidersHorizontal,
-  ListFilter,
-  LockKeyhole,
+  MapPin,
 } from "lucide-react";
 
 import { Combobox } from "@/components/Combobox";
 import { BarkSettings } from "@/components/BarkSettings";
-import { ProxySettings } from "@/components/ProxySettings";
 import { AutoCheckout } from "@/components/AutoCheckout";
 import { useInventoryPurchase } from "@/lib/inventory-purchase";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -99,62 +97,6 @@ function StatusBadge({ availability }: { availability: Availability }) {
       </TooltipTrigger>
       <TooltipContent className="max-w-90">{detail}</TooltipContent>
     </Tooltip>
-  );
-}
-
-/**
- * 一块带标题的分区。「在哪儿加什么」和「怎么跑」分开放，控件不再挤成一排。
- *
- * 传 `onToggle` 就可以折叠：标题行整行可点，折叠后只剩标题和一行摘要。
- */
-function Panel({
-  title,
-  hint,
-  open = true,
-  onToggle,
-  children,
-}: {
-  title: string;
-  hint?: string;
-  open?: boolean;
-  onToggle?: () => void;
-  children: ReactNode;
-}) {
-  const heading = (
-    <>
-      <h2 className="shrink-0 text-base font-semibold">{title}</h2>
-      {hint !== undefined && (
-        <p className="text-muted-foreground min-w-0 flex-1 truncate text-xs" title={hint}>
-          {hint}
-        </p>
-      )}
-      {onToggle !== undefined &&
-        (open ? (
-          <ChevronUp className="text-muted-foreground size-4 shrink-0" />
-        ) : (
-          <ChevronDown className="text-muted-foreground size-4 shrink-0" />
-        ))}
-    </>
-  );
-  return (
-    <section className="settings-panel bg-card text-card-foreground rounded-xl border shadow-xs">
-      {onToggle !== undefined ? (
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={onToggle}
-          className={cn(
-            "hover:bg-muted/40 flex w-full items-center gap-3 px-4 py-2 text-left",
-            open ? "rounded-t-xl" : "rounded-xl",
-          )}
-        >
-          {heading}
-        </button>
-      ) : (
-        <div className="flex items-center gap-3 px-4 py-2">{heading}</div>
-      )}
-      {open && <div className="grid gap-2.5 border-t px-4 pt-3 pb-4">{children}</div>}
-    </section>
   );
 }
 
@@ -239,13 +181,13 @@ export default function App() {
   const [families, setFamilies] = useState<string[]>([]);
   const [capacities, setCapacities] = useState<string[]>([]);
   const [colors, setColors] = useState<string[]>([]);
-  const [view, setView] = useState<"center" | "targets" | "plan" | "settings">("center");
-  const navigation = [
-    { id: "center", label: "捡漏中心", icon: Radar, caption: "实时库存与运行记录" },
-    { id: "targets", label: "监控目标", icon: ListFilter, caption: "选择门店、机型与配置" },
-    { id: "plan", label: "选购方案", icon: LockKeyhole, caption: "预算、分期与下单方式" },
-    { id: "settings", label: "手机提醒", icon: SlidersHorizontal, caption: "Bark 通知与代理线路" },
-  ] as const;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [planOpen, setPlanOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const settingsRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (settingsOpen) settingsRef.current?.scrollIntoView({ block: "start" });
+  }, [settingsOpen]);
   const storeOptions = useMemo(
     () => ui.stores.map((s) => ({ value: s.number, label: s.title })),
     [ui.stores],
@@ -321,14 +263,7 @@ export default function App() {
 
   const canAdd = storeNumbers.length > 0 && selectedProducts.length > 0;
 
-  // 被拦之后接下来会怎样，取决于代理怎么用。
-  const proxyMode = (ui.settings.proxies?.length ?? 0) > 0 ? ui.settings.proxyMode : "mixed";
-  const blockedHint =
-    proxyMode === "tunnel"
-      ? "受影响的库存状态为未知。下一轮会换新的出口 IP 继续查询；一直被拦请换一家代理。"
-      : proxyMode === "pool"
-        ? "受影响的库存状态为未知。被拦的代理会暂停 5～30 分钟，其余代理继续查询；全部被拦请换一批节点。"
-        : "受影响的库存状态为未知。程序会等待冷却结束后再尝试查询。";
+  const blockedHint = "受影响的库存状态为未知。程序会等待冷却结束后再尝试查询。";
 
   async function onAdd() {
     if (!canAdd) return;
@@ -368,37 +303,25 @@ export default function App() {
   return (
     <TooltipProvider delayDuration={200}>
       <div data-testid="watcher-layout" className="app-shell min-h-screen">
-        <aside className="app-sidebar">
-          <div className="brand"><span className="brand-symbol"><Radar size={25} /></span><div><strong>拾漏锁单</strong><small>发现好时机，接住每一单</small></div></div>
-          <nav aria-label="主导航">{navigation.map(item => <button type="button" key={item.id} aria-current={view === item.id ? "page" : undefined} onClick={() => setView(item.id)}><item.icon size={19}/><span>{item.label}</span></button>)}</nav>
-          <div className="sidebar-foot"><RunState running={ui.running}/><p>独立选购工具 · 非 Apple 官方</p></div>
-        </aside>
-        <main className="app-main">
-        <header className="app-toolbar flex items-center justify-between gap-4">
-          <div>
-            <p className="eyebrow">拾漏锁单 / {navigation.find(n => n.id === view)?.caption}</p>
-            <h1 className="text-2xl font-semibold tracking-tight">{navigation.find(n => n.id === view)?.label}</h1>
-          </div>
-          <div className="flex items-center gap-4">
+        <header className="app-toolbar">
+          <div className="brand"><span className="brand-symbol"><Radar size={23} /></span><div><h1>拾漏锁单</h1><p>Apple 门店库存监控</p></div></div>
+          <div className="toolbar-actions">
+            <div className="toolbar-run-state"><RunState running={ui.running} /></div>
+            <Button variant="ghost" aria-expanded={settingsOpen} aria-controls="notification-settings" onClick={() => setSettingsOpen(!settingsOpen)}>
+              <SlidersHorizontal /> 手机提醒
+            </Button>
             {ui.running ? (
-              <Button variant="secondary" onClick={() => void stopWatching()}>
+              <Button className="monitor-toggle" variant="secondary" onClick={() => void stopWatching()}>
                 <Pause /> 暂停监测
               </Button>
             ) : (
-              <Button onClick={() => void startWatching()} disabled={ui.rows.length === 0}>
+              <Button className="monitor-toggle" onClick={() => void startWatching()} disabled={ui.rows.length === 0}>
                 <Play /> 开始监测
               </Button>
             )}
           </div>
         </header>
-
-        <div hidden={view !== "center"} className="intro-strip">
-          <div><span className="eyebrow">把准备留在现在</span><h2>补货时，不必从头开始。</h2><p>设好监控目标和选购方案，让等待更简单。</p></div>
-          <div className="setup-shortcuts"><button onClick={() => setView("targets")}><b>01</b><span>选目标<small>{targets.length} 项监控配置</small></span></button><button onClick={() => setView("plan")}><b>02</b><span>设方案<small>预算与付款方式</small></span></button><button onClick={() => setView("settings")}><b>03</b><span>收提醒<small>设置 Bark 推送</small></span></button></div>
-        </div>
-        <div hidden={view !== "center" && view !== "plan"}>
-          <AutoCheckout targets={targets} expanded={view === "plan"} onSettings={() => setView(view === "plan" ? "center" : "plan")} />
-        </div>
+        <main className="app-main">
 
         {ui.trouble?.advice === "try_another_network" && (
           <div role="status" data-testid="monitor-protection"
@@ -454,184 +377,87 @@ export default function App() {
           </div>
         )}
 
-        <div hidden={view !== "targets"} data-testid="target-page">
-        <Panel
-          title="添加监控目标"
-          hint="先选门店，再选配置；支持多选"
-        >
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="grid gap-1.5">
-              <Label>地区</Label>
-              <Combobox
-                className="w-36"
-                options={ui.regions.map((r) => ({ value: r.locale, label: r.title }))}
-                value={ui.settings.locale}
-                onChange={(locale) => {
-                  // 换地区后旧的门店和型号都不再适用，清掉待添加的选择。
-                  setStoreNumbers([]);
-                  resetProductSelection();
-                  void changeLocale(locale);
-                }}
-                placeholder="选择地区"
-                searchPlaceholder="搜索地区…"
-                emptyText="没有匹配的地区"
-              />
+        <div className="monitor-workspace">
+          <div className="monitor-sidebar">
+          <aside data-testid="target-page" className="target-panel" aria-label="添加监控目标">
+            <div className="target-heading">
+              <div><h2>添加监控</h2></div>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="ghost" size="icon" aria-label="从 Apple 官网更新当前品类的型号列表" disabled={ui.refreshing} onClick={() => void refreshProducts()}>
+                    <RefreshCw className={ui.refreshing ? "animate-spin" : undefined} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>从 Apple 官网更新当前品类的型号列表。</TooltipContent>
+              </Tooltip>
             </div>
-
-            <div className="grid gap-1.5">
-              <Label>品类</Label>
-              <Combobox
-                className="w-36"
-                options={ui.categories.map((c) => ({ value: c.value, label: c.title }))}
-                value={ui.category}
-                onChange={(value) => {
-                  // 换品类后旧的型号不再在下拉框里，清掉待添加的选择。门店不用清，
-                  // 它跟品类无关。
-                  resetProductSelection();
-                  setCategory(value as Category);
-                }}
-                placeholder="选择品类"
-                searchPlaceholder="搜索品类…"
-                emptyText="没有匹配的品类"
-                disabled={ui.categories.length === 0}
-              />
-            </div>
-
-            <div className="grid gap-1.5">
-              <Label>门店（可多选）</Label>
-              <MultiCombobox
-                className="w-64"
-                options={storeOptions}
-                values={storeNumbers}
-                onChange={setStoreNumbers}
-                placeholder="选择自提门店"
-                searchPlaceholder="搜索门店…"
-                emptyText="没有匹配的门店"
-                countLabel={(n) => `已选 ${n} 家门店`}
-                disabled={storeOptions.length === 0}
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-end gap-3">
-            {ui.category === "iphone" ? (
-              <>
-                <div className="grid gap-1.5">
-                  <Label>机型（可多选）</Label>
-                  <MultiCombobox
-                    className="w-48"
-                    options={iphoneFamilyOptions}
-                    values={families}
-                    onChange={onFamiliesChange}
-                    placeholder="选择机型"
-                    searchPlaceholder="搜索机型…"
-                    emptyText="没有匹配的机型"
-                    countLabel={(n) => `已选 ${n} 款机型`}
-                    disabled={iphoneFamilyOptions.length === 0}
-                  />
+            <div className="target-fields">
+              <div className="field-pair">
+                <div className="target-field">
+                  <Label>地区</Label>
+                  <Combobox className="w-full" options={ui.regions.map(r => ({ value: r.locale, label: r.title }))}
+                    value={ui.settings.locale} onChange={locale => { setStoreNumbers([]); resetProductSelection(); void changeLocale(locale); }}
+                    placeholder="选择地区" searchPlaceholder="搜索地区…" emptyText="没有匹配的地区" />
                 </div>
-
-                <div className="grid gap-1.5">
-                  <Label>容量（可多选）</Label>
-                  <MultiCombobox
-                    className="w-36"
-                    options={iphoneCapacityOptions}
-                    values={capacities}
-                    onChange={onCapacitiesChange}
-                    placeholder="选择容量"
-                    searchPlaceholder="搜索容量…"
-                    emptyText="没有匹配的容量"
-                    countLabel={(n) => `已选 ${n} 种容量`}
-                    disabled={families.length === 0 || iphoneCapacityOptions.length === 0}
-                  />
+                <div className="target-field">
+                  <Label>品类</Label>
+                  <Combobox className="w-full" options={ui.categories.map(c => ({ value: c.value, label: c.title }))}
+                    value={ui.category} onChange={value => { resetProductSelection(); setCategory(value as Category); }}
+                    placeholder="选择品类" searchPlaceholder="搜索品类…" emptyText="没有匹配的品类" disabled={ui.categories.length === 0} />
                 </div>
-
-                <div className="grid gap-1.5">
-                  <Label>颜色（可多选）</Label>
-                  <MultiCombobox
-                    className="w-40"
-                    options={iphoneColorOptions}
-                    values={colors}
-                    onChange={setColors}
-                    placeholder="选择颜色"
-                    searchPlaceholder="搜索颜色…"
-                    emptyText="没有匹配的颜色"
-                    countLabel={(n) => `已选 ${n} 种颜色`}
-                    disabled={capacities.length === 0 || iphoneColorOptions.length === 0}
-                  />
-                </div>
-              </>
-            ) : (
-              <div className="grid gap-1.5">
-                <Label>型号</Label>
-                <Combobox
-                  className="w-96"
-                  options={productOptions}
-                  value={partNumber}
-                  onChange={setPartNumber}
-                  placeholder="选择型号"
-                  searchPlaceholder="搜索型号…"
-                  emptyText="没有匹配的型号"
-                  disabled={productOptions.length === 0}
-                />
               </div>
-            )}
-
-            <Button variant="secondary" onClick={() => void onAdd()} disabled={!canAdd}>
-              <Plus /> 添加
-            </Button>
-            {selectedProducts.length > 1 && (
-              // 多选时把要加的规模点明：三级各勾几项之后，组合数并不直观。
-              <span
-                className="text-muted-foreground pb-2 text-sm"
-                title={selectedProducts.map((p) => p.title).join("、")}
-              >
-                {selectedProducts.length} 个型号 × {storeNumbers.length} 家门店
-              </span>
-            )}
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label="从 Apple 官网更新当前品类的型号列表"
-                  disabled={ui.refreshing}
-                  onClick={() => void refreshProducts()}
-                >
-                  <RefreshCw className={ui.refreshing ? "animate-spin" : undefined} />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                从 Apple 官网更新当前品类的型号列表。新机发布后用这个，不必等程序更新。
-              </TooltipContent>
-            </Tooltip>
+              {ui.category === "iphone" ? <>
+                <div className="target-field">
+                  <Label>机型 <span>可多选</span></Label>
+                  <MultiCombobox className="w-full" options={iphoneFamilyOptions} values={families} onChange={onFamiliesChange}
+                    placeholder="选择机型" searchPlaceholder="搜索机型…" emptyText="没有匹配的机型"
+                    countLabel={n => `已选 ${n} 款机型`} disabled={iphoneFamilyOptions.length === 0} />
+                </div>
+                <div className="field-pair">
+                  <div className="target-field">
+                    <Label>容量 <span>可多选</span></Label>
+                    <MultiCombobox className="w-full" options={iphoneCapacityOptions} values={capacities} onChange={onCapacitiesChange}
+                      placeholder="选择容量" searchPlaceholder="搜索容量…" emptyText="没有匹配的容量"
+                      countLabel={n => `已选 ${n} 种容量`} disabled={families.length === 0 || iphoneCapacityOptions.length === 0} />
+                  </div>
+                  <div className="target-field">
+                    <Label>颜色 <span>可多选</span></Label>
+                    <MultiCombobox className="w-full" options={iphoneColorOptions} values={colors} onChange={setColors}
+                      placeholder="选择颜色" searchPlaceholder="搜索颜色…" emptyText="没有匹配的颜色"
+                      countLabel={n => `已选 ${n} 种颜色`} disabled={capacities.length === 0 || iphoneColorOptions.length === 0} />
+                  </div>
+                </div>
+              </> : <div className="target-field">
+                <Label>型号</Label>
+                <Combobox className="w-full" options={productOptions} value={partNumber} onChange={setPartNumber}
+                  placeholder="选择型号" searchPlaceholder="搜索型号…" emptyText="没有匹配的型号" disabled={productOptions.length === 0} />
+              </div>}
+              <div className="target-field store-field">
+                <Label><MapPin size={13} /> 自提门店 <span>可多选</span></Label>
+                <MultiCombobox className="w-full" options={storeOptions} values={storeNumbers} onChange={setStoreNumbers}
+                  placeholder="选择自提门店" searchPlaceholder="搜索门店…" emptyText="没有匹配的门店"
+                  countLabel={n => `已选 ${n} 家门店`} disabled={storeOptions.length === 0} />
+              </div>
+            </div>
+            <div className="target-actions">
+              <Button className="w-full" variant="secondary" onClick={() => void onAdd()} disabled={!canAdd}><Plus /> 添加</Button>
+              <p className="target-selection-note" aria-live="polite">
+                {selectedProducts.length > 0 ? <span title={selectedProducts.map(p => p.title).join("、")}>{selectedProducts.length} 个型号 × {storeNumbers.length} 家门店</span> : "支持多选，已添加的目标会自动跳过"}
+              </p>
+            </div>
+          </aside>
           </div>
-        </Panel>
-        <p className="section-note">添加后在捡漏中心查看每一项的库存状态。</p>
-        <Button variant="outline" onClick={() => setView("center")}>查看已添加的 {targets.length} 项监控</Button>
-        </div>
-        <div hidden={view !== "settings"} data-testid="settings-page">
-        <BarkSettings saved={ui.settings.barkUrl || ""} />
-        <ProxySettings settings={ui.settings} />
-        </div>
-        <div hidden={view !== "center"} data-testid="inventory-page" className="inventory-page">
-        <div className="inventory-heading"><div><h2>库存一览</h2><p>型号、门店和库存状态，集中查看。</p></div><Button variant="outline" size="sm" onClick={() => setView("targets")}><Plus/>添加目标</Button></div>
-        <div className="inventory-stats flex flex-wrap items-center gap-2">
-          <Stat label="监控" value={ui.rows.length} />
-          <Stat label="有货" value={summary.inStock} tone="inStock" />
-          <Stat label="无货" value={summary.outOfStock} />
-          {summary.untrusted > 0 && <Stat label="查询异常" value={summary.untrusted} tone="unknown" />}
-          {ui.running && ui.pacing !== null && ui.pacing.paced && (
-            <span className="text-muted-foreground ml-auto text-sm">
-              查询预算等待
-            </span>
-          )}
-        </div>
-
-        {/* Extra controls must never consume the table's remaining height. Grow
-            the page instead, preserving readable rows even with settings open. */}
-        <section aria-label="监控型号与库存状态" className="bg-card h-[clamp(20rem,40vh,40rem)] shrink-0 overflow-hidden rounded-xl border shadow-xs">
+          <div className="monitor-content">
+          <div data-testid="inventory-page" className="inventory-page">
+            <div className="inventory-heading">
+              <div><span className="eyebrow">LIVE INVENTORY</span><h2>关注的库存 <span className="target-count">{ui.rows.length}</span></h2></div>
+              <div className="inventory-stats">
+                <Stat label="有货" value={summary.inStock} tone="inStock" />
+                <Stat label="无货" value={summary.outOfStock} />
+                {summary.untrusted > 0 && <Stat label="查询异常" value={summary.untrusted} tone="unknown" />}
+              </div>
+            </div>
+        <section aria-label="监控型号与库存状态" className="inventory-table shrink-0">
           <ScrollArea className="h-full">
             <Table>
               <TableHeader>
@@ -639,14 +465,14 @@ export default function App() {
                   <TableHead className="text-muted-foreground w-24 pl-4 text-xs">状态</TableHead>
                   <TableHead className="text-muted-foreground text-xs">门店</TableHead>
                   <TableHead className="text-muted-foreground text-xs">型号</TableHead>
-                  <TableHead className="w-40" />
+                  <TableHead className="w-32"><span className="sr-only">操作</span></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {ui.rows.length === 0 ? (
                   <TableRow className="hover:bg-transparent">
                     <TableCell colSpan={4} className="text-muted-foreground h-28 text-center">
-                      {ui.ready ? "还没有监控目标。前往「监控目标」选好门店和型号，点「添加」。" : "正在载入…"}
+                      <div className="inventory-empty"><Radar size={34} /><strong>{ui.ready ? "从一个心仪的型号开始" : "正在载入…"}</strong><p>{ui.ready ? "在左侧选择型号与门店，添加后即可开始监控。" : "正在读取已保存的监控目标"}</p></div>
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -706,19 +532,29 @@ export default function App() {
           </DialogContent>
         </Dialog>
 
-        <div className="inventory-heading log-heading"><h2>最近查询</h2></div>
-        <section aria-label="查询日志" className="bg-card h-40 shrink-0 overflow-hidden rounded-xl border shadow-xs">
+        <div className="inventory-footer">
+          <span>库存以 Apple 官网为准</span>
+          {ui.running && ui.pacing?.paced && <span>查询预算等待</span>}
+          <button type="button" className="log-toggle" aria-expanded={logsOpen} aria-controls="query-logs" onClick={() => setLogsOpen(!logsOpen)}>查询日志 {logsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
+        </div>
+        <section id="query-logs" aria-label="查询日志" hidden={!logsOpen} className="query-logs shrink-0">
           <ScrollArea className="h-full">
-            <div className="p-3 font-mono text-xs leading-5 select-text">
-              {ui.logs.length === 0 ? (
-                <p className="text-muted-foreground">日志会显示在这里。</p>
-              ) : (
-                ui.logs.map((line, i) => <LogLine key={i} line={line} />)
-              )}
+            <div className="p-4 font-mono text-xs leading-6 select-text">
+              {ui.logs.length === 0 ? <p className="text-muted-foreground">开始监控后，查询记录会显示在这里。</p> : ui.logs.map((line, i) => <LogLine key={i} line={line} />)}
             </div>
           </ScrollArea>
         </section>
+          </div>
+          </div>
         </div>
+        <AutoCheckout targets={targets} expanded={planOpen} onSettings={() => setPlanOpen(!planOpen)} />
+        <section id="notification-settings" ref={settingsRef} hidden={!settingsOpen} className="notification-settings" aria-label="手机提醒设置">
+          <div className="settings-heading"><div><h2>手机提醒</h2><p>保存后生效，收起面板会保留未保存的输入。</p></div><Button variant="ghost" size="sm" onClick={() => setSettingsOpen(false)}><ChevronUp /> 收起设置</Button></div>
+          <div data-testid="settings-page" className="settings-grid">
+            <BarkSettings saved={ui.settings.barkUrl || ""} />
+          </div>
+        </section>
+        <footer className="app-footer"><span>拾漏锁单</span><span>独立选购工具 · 非 Apple 官方</span></footer>
         </main>
       </div>
     </TooltipProvider>

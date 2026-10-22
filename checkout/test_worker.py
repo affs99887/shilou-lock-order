@@ -13,7 +13,24 @@ def hit():
             'product': {'partNumber': 'TESTCH/A', 'family': 'iphone17', 'category': 'iphone',
                         'capacity': '256GB', 'color': '白色'}}
 
+def community_hit():
+    h = hit()
+    h.pop('availability'); h.pop('lastCheckedMs')
+    h.update(source='sunbelife_aggregate', reportedAtMs=90000, receivedAtMs=100000)
+    return h
+
 class CandidateTests(unittest.TestCase):
+    def test_community_hint_preserves_mapping_and_does_not_claim_confirmed_stock(self):
+        h = community_hit()
+        self.assertEqual(plan_for_hit(DEFAULTS, h, now=100001)['store_id'], STORES[0]['id'])
+        self.assertNotIn('availability', h)
+        for field, value in [('source','unknown'), ('reportedAtMs', -100000), ('reportedAtMs',100001),
+                             ('reportedAtMs',True), ('receivedAtMs',84999), ('receivedAtMs',100001), ('receivedAtMs',None)]:
+            bad=copy.deepcopy(h); bad[field]=value
+            with self.subTest(field=field,value=value), self.assertRaises(ValueError):
+                plan_for_hit(DEFAULTS,bad,now=100000)
+        h['target']['partNumber']='WRONG'
+        with self.assertRaises(ValueError): plan_for_hit(DEFAULTS,h,now=100000)
     def test_manual_selection_keeps_confirmed_stock_and_exact_mapping_without_automatic_age_gate(self):
         self.assertEqual(plan_for_hit(DEFAULTS,hit(),now=999999,manual=True)['store_id'],STORES[0]['id'])
         for state in ('unknown','out_of_stock'):
@@ -114,6 +131,20 @@ class BridgeTests(unittest.TestCase):
 
     def test_offer_disarmed_no_task(self):
         self.b.request({'op':'offer','hits':[hit()]})
+        self.assertTrue(self.b.tasks.empty())
+
+    @patch('worker.time.time',return_value=100)
+    def test_community_offer_requires_arming_and_shares_the_single_order_reservation(self, _):
+        self.b.request({'op':'offer','hits':[community_hit()]})
+        self.assertTrue(self.b.tasks.empty())
+        self.b.armed=True
+        self.b.request({'op':'offer','hits':[community_hit()]})
+        self.b.request({'op':'offer','hits':[hit(),community_hit()]})
+        self.assertEqual(self.b.tasks.qsize(),1)
+        _,op,h=self.b.tasks.get_nowait()
+        self.assertEqual(op,'start'); self.assertEqual(h['source'],'sunbelife_aggregate')
+        self.b.request({'op':'stop'})
+        self.b.request({'op':'offer','hits':[community_hit()]})
         self.assertTrue(self.b.tasks.empty())
 
     @patch('worker.time.time',return_value=100)

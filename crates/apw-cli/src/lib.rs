@@ -344,16 +344,10 @@ pub async fn execute<W: AsyncWrite + Unpin>(cli: Cli, out: &mut W) -> Result<u8,
                 "source": source, "refreshComplete": if refresh { Some(complete) } else { None }, "warning": warning, "products": products})).await?;
             return Ok(if complete { 0 } else { 3 });
         }
-        Command::Check {
-            targets,
-            proxy,
-            proxy_mode,
-            ..
-        } => {
+        Command::Check { targets, proxy, .. } => {
             let targets = load_targets(targets, &catalog).await?;
             let client = AppleClient::new(ClientConfig {
                 proxies: proxy,
-                proxy_mode: proxy_mode.into(),
                 ..ClientConfig::default()
             })
             .map_err(|e| CliError::new(1, "client_error", e.to_string()))?;
@@ -364,13 +358,11 @@ pub async fn execute<W: AsyncWrite + Unpin>(cli: Cli, out: &mut W) -> Result<u8,
             interval,
             until_in_stock,
             proxy,
-            proxy_mode,
             ..
         } => {
             let targets = load_targets(targets, &catalog).await?;
             let client = AppleClient::new(ClientConfig {
                 proxies: proxy,
-                proxy_mode: proxy_mode.into(),
                 ..ClientConfig::default()
             })
             .map_err(|e| CliError::new(1, "client_error", e.to_string()))?;

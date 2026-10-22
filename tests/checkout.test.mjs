@@ -88,6 +88,15 @@ test('armed checkout explains why activation and editing are locked',()=>{
  assert.equal(a.button('已启用，等待有货').props.disabled,true);
  assert.match(a.nodes().find(n=>n.props['data-testid']==='checkout-disabled-reason').props.children,/先停止选购/);
 });
+test('folded plan keeps the stop control available for armed, active and stopping checkout',()=>{
+ const a=ui({},undefined,{expanded:false});
+ assert.equal(a.button('停止选购').props.hidden,true);
+ for(const state of ['armed','busy','stopping']){
+  a.hooks[0][state]=true;
+  assert.equal(a.button('停止选购').props.hidden,false,state);
+  a.hooks[0][state]=false;
+ }
+});
 test('arming without submission permission does not require order confirmation',async()=>{
  const a=ui();a.button('启用有货自动选购').props.onClick();await new Promise(setImmediate);
  assert.deepEqual(a.calls.map(x=>x.op),['configure','arm']);

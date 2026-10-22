@@ -89,20 +89,15 @@ export interface Settings {
   openBagOnHit: boolean;
   /** 代理地址列表；每个代理是一条额外的出口线路，被拦时切换。可为空。 */
   proxies: string[];
-  /** 代理怎么用，见 {@link ProxyMode}。没有代理时不起作用。 */
-  proxyMode: ProxyMode;
 }
 
-/**
- * 代理怎么用，与 Rust 侧 `ProxyMode` 对应。
- *
- * - `mixed`：本机网络和代理轮流用，固定 60 秒一次。
- * - `pool`：只用代理轮流，被拦的代理单独暂停、连不上的先跳过；适合机场节点。
- * - `tunnel`：只用代理，每次查询换一个出口 IP；适合按请求换 IP 的隧道代理。
- *
- * 后两种不走本机网络，查询间隔可以调到 5 秒。
- */
-export type ProxyMode = "mixed" | "pool" | "tunnel";
+export interface CommunityStatus {
+  running: boolean;
+  lastCheckedMs: number | null;
+  lastSignal: { target: Target; product: Product; source: "sunbelife_aggregate"; reportedAtMs: number; receivedAtMs: number } | null;
+  error: string | null;
+  nextCheckInSecs: number | null;
+}
 
 /** 监控目标的唯一键，与 Rust 侧 Target::key 的构成保持一致。 */
 export function targetKey(t: Target): string {
