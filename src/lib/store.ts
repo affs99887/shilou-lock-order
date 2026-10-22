@@ -74,7 +74,7 @@ const DEFAULT_SETTINGS: Settings = {
   soundEnabled: false,
   openBagOnHit: true,
   proxies: [],
-  rotateProxies: false,
+  proxyMode: "mixed",
 };
 
 let state: UiState = {
@@ -294,10 +294,10 @@ export async function saveBarkAddress(barkUrl: string): Promise<void> {
  * 保存代理线路与查询间隔，返回后端实际存下的设置。
  *
  * 失败时抛出，让设置面板把原因显示出来：代理没生效时界面不能显示「已保存」。
- * 间隔由后端按规则收敛（只有隧道代理模式能低于 60 秒），以返回值为准。
+ * 间隔由后端按规则收敛（只有不走本机网络的两种模式能低于 60 秒），以返回值为准。
  */
 export async function saveProxySettings(
-  patch: Pick<Settings, "proxies" | "rotateProxies" | "intervalSeconds">,
+  patch: Pick<Settings, "proxies" | "proxyMode" | "intervalSeconds">,
 ): Promise<Settings> {
   try {
     const saved = await invoke<Settings>("save_settings", { settings: { ...state.settings, ...patch } });

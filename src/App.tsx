@@ -321,6 +321,15 @@ export default function App() {
 
   const canAdd = storeNumbers.length > 0 && selectedProducts.length > 0;
 
+  // 被拦之后接下来会怎样，取决于代理怎么用。
+  const proxyMode = (ui.settings.proxies?.length ?? 0) > 0 ? ui.settings.proxyMode : "mixed";
+  const blockedHint =
+    proxyMode === "tunnel"
+      ? "受影响的库存状态为未知。下一轮会换新的出口 IP 继续查询；一直被拦请换一家代理。"
+      : proxyMode === "pool"
+        ? "受影响的库存状态为未知。被拦的代理会暂停 5～30 分钟，其余代理继续查询；全部被拦请换一批节点。"
+        : "受影响的库存状态为未知。程序会等待冷却结束后再尝试查询。";
+
   async function onAdd() {
     if (!canAdd) return;
 
@@ -396,11 +405,7 @@ export default function App() {
             className="border-unknown/30 bg-unknown/5 grid gap-1.5 rounded-lg border px-4 py-3 text-sm">
             <p className="text-unknown font-medium">库存查询受阻</p>
             <p className="break-words">{ui.trouble.reason}</p>
-            <p className="text-muted-foreground">
-              {ui.settings.rotateProxies && (ui.settings.proxies?.length ?? 0) > 0
-                ? "受影响的库存状态为未知。下一轮会换新的出口 IP 继续查询；一直被拦请换一家代理。"
-                : "受影响的库存状态为未知。程序会等待冷却结束后再尝试查询。"}
-            </p>
+            <p className="text-muted-foreground">{blockedHint}</p>
           </div>
         )}
         {ui.trouble !== null && ui.trouble.advice !== "try_another_network" && (

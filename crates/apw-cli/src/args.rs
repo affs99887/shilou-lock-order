@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use apw_core::apple::ProxyMode;
 use apw_core::model::Category;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -47,15 +48,16 @@ pub enum Command {
         #[command(flatten)]
         targets: TargetArgs,
         /// Proxy URL (http, https, socks5, socks5h); repeat or comma-separate for several.
-        /// Each proxy is an extra egress route rotated with the direct connection and
-        /// switched to when a route gets HTTP 541.
+        /// Each proxy is an extra egress route, switched to when a route gets HTTP 541;
+        /// --proxy-mode decides whether the direct connection takes part.
         #[arg(long, value_delimiter = ',')]
         proxy: Vec<String>,
-        /// Treat every --proxy as a rotating tunnel proxy: each query opens a fresh
-        /// connection and cookie session (new egress IP) and the direct connection is
-        /// never used.
-        #[arg(long, requires = "proxy")]
-        rotate_proxies: bool,
+        /// How proxies are used: `mixed` rotates them with the direct connection;
+        /// `pool` uses only the proxies, each a fixed egress that cools down on its own;
+        /// `tunnel` uses only the proxies as rotating tunnels (fresh connection and cookie
+        /// session, so a new egress IP, for every query).
+        #[arg(long, value_enum, default_value_t = ProxyModeArg::Mixed)]
+        proxy_mode: ProxyModeArg,
         /// Overall deadline in seconds, including reading target input.
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=86400))]
         timeout: u64,
@@ -65,15 +67,16 @@ pub enum Command {
         #[command(flatten)]
         targets: TargetArgs,
         /// Proxy URL (http, https, socks5, socks5h); repeat or comma-separate for several.
-        /// Each proxy is an extra egress route rotated with the direct connection and
-        /// switched to when a route gets HTTP 541.
+        /// Each proxy is an extra egress route, switched to when a route gets HTTP 541;
+        /// --proxy-mode decides whether the direct connection takes part.
         #[arg(long, value_delimiter = ',')]
         proxy: Vec<String>,
-        /// Treat every --proxy as a rotating tunnel proxy: each query opens a fresh
-        /// connection and cookie session (new egress IP) and the direct connection is
-        /// never used.
-        #[arg(long, requires = "proxy")]
-        rotate_proxies: bool,
+        /// How proxies are used: `mixed` rotates them with the direct connection;
+        /// `pool` uses only the proxies, each a fixed egress that cools down on its own;
+        /// `tunnel` uses only the proxies as rotating tunnels (fresh connection and cookie
+        /// session, so a new egress IP, for every query).
+        #[arg(long, value_enum, default_value_t = ProxyModeArg::Mixed)]
+        proxy_mode: ProxyModeArg,
         /// Base interval in seconds; engine jitter and failure backoff still apply.
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(5..=86400))]
         interval: u64,
@@ -143,6 +146,24 @@ pub enum ProductCategory {
     Ipad,
     Mac,
     Watch,
+}
+
+/// `--proxy-mode` 的取值，对应 [`ProxyMode`]。
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ProxyModeArg {
+    Mixed,
+    Pool,
+    Tunnel,
+}
+
+impl From<ProxyModeArg> for ProxyMode {
+    fn from(value: ProxyModeArg) -> Self {
+        match value {
+            ProxyModeArg::Mixed => Self::Mixed,
+            ProxyModeArg::Pool => Self::Pool,
+            ProxyModeArg::Tunnel => Self::Tunnel,
+        }
+    }
 }
 
 impl From<ProductCategory> for Category {

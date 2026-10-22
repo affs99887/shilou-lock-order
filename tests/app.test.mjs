@@ -223,7 +223,7 @@ test("navigation keeps original controls mounted and preserves target draft", ()
   assert.deepEqual(app.addedTargets, []);
 });
 
-test("settings page carries proxy lines and blocked rotation promises a new IP, not a cooldown", () => {
+test("settings page carries proxy lines and the blocked hint follows the proxy mode", () => {
   const app = renderApp();
   const settingsPage = app.control(e => e.props?.["data-testid"] === "settings-page");
   assert.ok([settingsPage.children].flat().some(e => e?.type === "ProxySettings"));
@@ -231,8 +231,12 @@ test("settings page carries proxy lines and blocked rotation promises a new IP, 
     e.props.children.startsWith("受影响的库存状态为未知。"))[0].props.children;
   app.state.trouble = { reason: "查询失败：HTTP 541", advice: "try_another_network" };
   assert.match(hint(), /等待冷却结束/);
-  app.state.settings = { ...app.state.settings, proxies: ["http://user:pass@tunnel.example:15818"], rotateProxies: true };
+  app.state.settings = { ...app.state.settings, proxies: ["http://127.0.0.1:18001"], proxyMode: "pool" };
+  assert.match(hint(), /被拦的代理会暂停 5～30 分钟，其余代理继续查询/);
+  app.state.settings = { ...app.state.settings, proxies: ["http://user:pass@tunnel.example:15818"], proxyMode: "tunnel" };
   assert.match(hint(), /换新的出口 IP/);
+  app.state.settings = { ...app.state.settings, proxies: [], proxyMode: "tunnel" };
+  assert.match(hint(), /等待冷却结束/, "没有代理时模式不起作用");
 });
 
 const K1 = "https://api.day.app/k1";

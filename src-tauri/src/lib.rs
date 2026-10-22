@@ -26,6 +26,7 @@ use tauri_plugin_updater::UpdaterExt;
 mod auto_open;
 mod checkout;
 mod checkout_hits;
+mod monitor_alert;
 mod notification_queue;
 mod monitor_policy;
 
@@ -172,10 +173,10 @@ async fn save_settings(
 
     // 代理变了就换线路，立即生效；地址解析不了就把错误报回界面，什么都不改。
     // 必须先于改间隔：换线路失败时，不能让 5 秒的间隔落到本机直连上。
-    if next.proxies != previous.proxies || next.rotate_proxies != previous.rotate_proxies {
+    if next.proxies != previous.proxies || next.proxy_mode != previous.proxy_mode {
         state
             .client
-            .set_proxies(&next.proxies, next.rotate_proxies)
+            .set_proxies(&next.proxies, next.proxy_mode)
             .await
             .map_err(|e| format!("代理设置未生效：{e}"))?;
     }
@@ -473,9 +474,12 @@ fn emit_system_notification(app: &AppHandle, n: &Notification) {
     }
 }
 
-/// 消费引擎事件：转发给前端，并在有货时发提醒。
+/// 消费引擎事件：转发给前端，并在有货时发提醒；监控连续查不到结果时也提醒。
 async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Event>) {
     let mut auto_open_bag = AutoOpenBag::default();
+    let mut failure_alert = monitor_alert::FailureAlert::default();
+    // 最近一条告警原因，查不到结果时写进提醒里，让人知道该查代理还是网络。
+    let mut last_trouble: Option<String> = None;
     let (notifications, pending) = notification_queue::channel();
     let notification_app = app.clone();
     tauri::async_runtime::spawn(notification_queue::run(pending, move |notification| {
@@ -509,8 +513,54 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             }
         }
 
+        if let Event::Trouble { reason, .. } = &event {
+            last_trouble = Some(reason.clone());
+        }
+
+        if let Event::CycleComplete { snapshot, .. } = &event {
+            // 有货、无货都算拿到了结果；一个都没有就是这一轮什么也没查到。
+            let answered =
+                snapshot.is_empty() || snapshot.iter().any(|s| !s.availability.is_unknown());
+            if let Some(alert) = failure_alert.on_cycle(answered, std::time::Instant::now()) {
+                // 标题都带「有货」二字：飞书机器人开了关键词校验时，不含关键词的消息会被拒收。
+                let notification = match alert {
+                    monitor_alert::Alert::Failing => {
+                        let reason: String = last_trouble
+                            .clone()
+                            .or_else(|| {
+                                snapshot
+                                    .iter()
+                                    .find_map(|s| s.availability.describe_reason())
+                            })
+                            .unwrap_or_default()
+                            .chars()
+                            .take(200)
+                            .collect();
+                        Notification::new(
+                            "监控受阻，可能错过有货",
+                            format!(
+                                "已连续 {} 分钟查不到库存结果，请检查代理或网络。{reason}",
+                                monitor_alert::FAILING_AFTER.as_secs() / 60
+                            ),
+                        )
+                    }
+                    monitor_alert::Alert::Recovered => {
+                        Notification::new("库存监控已恢复，有货会照常提醒", "重新查到了库存结果")
+                    }
+                };
+                if notifications.send(notification).await.is_err() {
+                    let _ = app.emit(NOTICE_CHANNEL, "提醒发送任务已停止，无法发送监控异常提醒");
+                }
+            }
+            if answered {
+                last_trouble = None;
+            }
+        }
+
         if let Event::RunStateChanged { running } = &event {
             auto_open_bag.on_run_state_changed(*running);
+            failure_alert.on_run_state_changed();
+            last_trouble = None;
         }
 
         if let Event::InStock { state } = &event {
@@ -728,7 +778,7 @@ pub fn run() {
 
             let client = AppleClient::new(ClientConfig {
                 proxies: settings.proxies.clone(),
-                rotate_proxies: settings.rotate_proxies,
+                proxy_mode: settings.proxy_mode,
                 ..ClientConfig::default()
             })
             .map_err(|e| format!("构造 Apple 客户端失败：{e}"))?;

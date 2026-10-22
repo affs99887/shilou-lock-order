@@ -226,11 +226,20 @@ const BLOCK_COOLDOWNS: [Duration; 4] = [
     Duration::from_secs(30 * 60),
 ];
 
-/// 隧道代理模式下，一次查询里出口 IP 被拦后最多再换几次 IP 重查。
+/// 一次查询最多试几次：换几条线路，或者隧道代理换几个出口 IP。
 ///
-/// 换 IP 只要新建一条连接，比整条线路冷却几分钟划算；但代理商的 IP 整批被盯上时
-/// 换多少次都一样，所以封顶，之后交给引擎的整轮退避去放慢。
-const ROTATE_RETRIES: u32 = 2;
+/// 线路再多也只试这么多。被拦往往是一整批 IP 一起，挨个撞一遍只会让更多 IP 进冷却；
+/// 剩下的交给引擎的整轮退避去放慢。
+const MAX_ATTEMPTS: u32 = 3;
+
+/// 代理线路连不上之后暂停使用多久：首次 30 秒，接连失败依次延长到 1、2、5 分钟，
+/// 连上一次就清零。节点挂了还每轮去连，每次都要白等到超时。
+const DOWN_COOLDOWNS: [Duration; 4] = [
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+];
 
 /// 保留最近多少条出站请求记录，供诊断命令和日志使用。
 const RECENT_RECORDS: usize = 256;
@@ -419,6 +428,16 @@ enum RouteAvailability {
     /// 冷却刚结束，已有一次探测在飞，先别往这条线路再塞请求。
     Probing,
     Cooling(Duration),
+    /// 代理连不上，暂停到期前不用，见 [`DOWN_COOLDOWNS`]。
+    Down(Duration),
+}
+
+/// 代理线路连不上后的暂停状态。
+#[derive(Debug, Default)]
+struct DownState {
+    until: Option<Instant>,
+    /// 已用到 [`DOWN_COOLDOWNS`] 的第几档，0 表示没有在暂停。
+    level: usize,
 }
 
 /// 一条出口线路：直连，或经某个代理。
@@ -439,10 +458,13 @@ struct Route {
     proxy: Option<String>,
     /// 隧道代理：代理商按连接分配出口 IP，每次查询新建连接就换一个 IP。
     rotating: bool,
+    /// 不参与查询：只用代理的两种模式下的直连，见 [`ProxyMode`]。
+    standby: bool,
     http: Http,
     warm: Mutex<HashMap<String, WarmState>>,
     blocks: Mutex<BlockTracker>,
     budget: Mutex<BudgetState>,
+    down: Mutex<DownState>,
 }
 
 impl Route {
@@ -451,21 +473,48 @@ impl Route {
         label: String,
         proxy: Option<&str>,
         rotating: bool,
+        standby: bool,
     ) -> Result<Self, ApiError> {
         Ok(Self {
             label,
             endpoint: proxy.map(redact_proxy),
             proxy: proxy.map(str::to_string),
             rotating: rotating && proxy.is_some(),
+            standby,
             http: Http::build(config, proxy)?,
             warm: Mutex::new(HashMap::new()),
             blocks: Mutex::new(BlockTracker::default()),
             budget: Mutex::new(BudgetState::new(&config.budget, Instant::now())),
+            down: Mutex::new(DownState::default()),
         })
     }
 
     fn is_proxy(&self) -> bool {
         self.label != "direct"
+    }
+
+    /// 代理连不上：暂停一段时间，接连失败逐档延长，返回这次暂停多久。
+    async fn mark_down(&self, now: Instant) -> Duration {
+        let mut down = self.down.lock().await;
+        down.level = (down.level + 1).min(DOWN_COOLDOWNS.len());
+        let pause = DOWN_COOLDOWNS[down.level - 1];
+        down.until = Some(now + pause);
+        pause
+    }
+
+    /// 连上了一次：暂停档位清零。
+    async fn mark_up(&self) {
+        *self.down.lock().await = DownState::default();
+    }
+
+    /// 还要暂停多久；没在暂停为 `None`。
+    async fn down_left(&self, now: Instant) -> Option<Duration> {
+        self.down
+            .lock()
+            .await
+            .until
+            .filter(|until| now < *until)
+            .map(|until| until - now)
     }
 
     /// 这次查询用的传输层。隧道代理每次新建一个：新连接拿到新的出口 IP，空的
@@ -496,35 +545,52 @@ impl std::fmt::Debug for Route {
 }
 
 /// 直连排第一，之后每个代理一条线路。空白项跳过；地址不合法就整体报错，
-/// 而不是悄悄少一条线路让用户以为代理在生效。`rotate` 为真时代理线路都按隧道
-/// 代理处理，见 [`ClientConfig::rotate_proxies`]。
+/// 而不是悄悄少一条线路让用户以为代理在生效。代理怎么用见 [`ProxyMode`]；
+/// 一个代理都没有时直连照常工作，不管是哪种模式。
 fn build_routes(
     config: &ClientConfig,
     proxies: &[String],
-    rotate: bool,
+    mode: ProxyMode,
 ) -> Result<Vec<Arc<Route>>, ApiError> {
-    let mut routes = vec![Arc::new(Route::build(
-        config,
-        "direct".into(),
-        None,
-        false,
-    )?)];
-    let mut n = 0usize;
+    let mut proxy_routes = Vec::new();
     for proxy in proxies {
         let proxy = proxy.trim();
         if proxy.is_empty() {
             continue;
         }
         validate_proxy(proxy)?;
-        n += 1;
-        routes.push(Arc::new(Route::build(
+        proxy_routes.push(Arc::new(Route::build(
             config,
-            format!("proxy#{n}"),
+            format!("proxy#{}", proxy_routes.len() + 1),
             Some(proxy),
-            rotate,
+            mode == ProxyMode::Tunnel,
+            false,
         )?));
     }
+    let standby = mode != ProxyMode::Mixed && !proxy_routes.is_empty();
+    let mut routes = vec![Arc::new(Route::build(
+        config,
+        "direct".into(),
+        None,
+        false,
+        standby,
+    )?)];
+    routes.extend(proxy_routes);
     Ok(routes)
+}
+
+/// 代理怎么用。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProxyMode {
+    /// 直连和代理一起轮流用（issue #37 的原始做法）。
+    #[default]
+    Mixed,
+    /// 只用代理，每个代理是一个固定出口：被拦的单独冷却，连不上的暂停一会儿，
+    /// 各自记预算、各自留 cookie。适合机场节点：每个节点开一个本地端口。
+    Pool,
+    /// 只用代理，代理是「每次请求换 IP」的隧道代理，见 [`ClientConfig::proxy_mode`]。
+    Tunnel,
 }
 
 /// 代理地址先由我们自己把关，再交给传输层。
@@ -665,19 +731,20 @@ pub struct ClientConfig {
     /// 换下一条继续查，见 [`AppleClient::query`]。Apple 的配额按出口 IP 计，多一条
     /// 线路就多一份配额 —— 这是 issue #37 要的。为空则只有直连。
     pub proxies: Vec<String>,
-    /// 把代理当作「每次请求换 IP」的隧道代理（代理商按连接分配出口 IP）。
+    /// 代理怎么用，见 [`ProxyMode`]。没有代理时无效。
     ///
     /// Apple 按出口 IP、按会话累计取货查询的次数（见 [`Budget`]），同一个 IP 上
-    /// 几秒一次查询，几分钟就会被拦。打开后：
+    /// 几秒一次查询，几分钟就会被拦。两种「只用代理」的模式都让**直连不参与**：
+    /// 本机 IP 要留给浏览器里的选购，快节奏查询不能把它烧掉。
+    ///
+    /// [`ProxyMode::Tunnel`] 另外：
     ///
     /// - 每次查询新建连接和 cookie 罐，暖场与查询走同一条连接，出口 IP 和会话
     ///   一起换新，次数攒不起来；
-    /// - 代理线路不计预算；某个 IP 被拦不冷却整条线路，立刻换 IP 重查，最多
-    ///   [`ROTATE_RETRIES`] 次；
-    /// - **直连不再参与**：本机 IP 要留给浏览器里的选购，快节奏查询不能把它烧掉。
-    ///
-    /// 代价是每次查询多一次暖场请求（流量约多一个购物袋页面）。没有代理时无效。
-    pub rotate_proxies: bool,
+    /// - 代理线路不计预算；某个 IP 被拦不冷却整条线路，立刻换 IP 重查，一次查询
+    ///   最多试 [`MAX_ATTEMPTS`] 个 IP；
+    /// - 代价是每次查询多一次暖场请求（流量约多一个购物袋页面）。
+    pub proxy_mode: ProxyMode,
 }
 
 impl Default for ClientConfig {
@@ -691,7 +758,7 @@ impl Default for ClientConfig {
             transport: Transport::default_for_build(),
             budget: Budget::default(),
             proxies: Vec::new(),
-            rotate_proxies: false,
+            proxy_mode: ProxyMode::Mixed,
         }
     }
 }
@@ -773,7 +840,7 @@ pub struct AppleClient {
 
 impl AppleClient {
     pub fn new(config: ClientConfig) -> Result<Self, ApiError> {
-        let routes = build_routes(&config, &config.proxies, config.rotate_proxies)?;
+        let routes = build_routes(&config, &config.proxies, config.proxy_mode)?;
         Ok(Self {
             routes: Arc::new(RwLock::new(routes)),
             cursor: Arc::new(AtomicUsize::new(0)),
@@ -784,10 +851,10 @@ impl AppleClient {
     }
 
     /// 换一套代理，立即生效，不用重建客户端。线路全部重建：cookie、暖场、冷却和
-    /// 预算都从头来 —— 改代理本来就意味着换了出口。`rotate` 含义同
-    /// [`ClientConfig::rotate_proxies`]。地址解析不了返回错误，原线路不动。
-    pub async fn set_proxies(&self, proxies: &[String], rotate: bool) -> Result<(), ApiError> {
-        let routes = build_routes(&self.config, proxies, rotate)?;
+    /// 预算都从头来 —— 改代理本来就意味着换了出口。`mode` 见
+    /// [`ClientConfig::proxy_mode`]。地址解析不了返回错误，原线路不动。
+    pub async fn set_proxies(&self, proxies: &[String], mode: ProxyMode) -> Result<(), ApiError> {
+        let routes = build_routes(&self.config, proxies, mode)?;
         *self.routes.write().await = routes;
         self.cursor.store(0, Ordering::Relaxed);
         Ok(())
@@ -1018,15 +1085,14 @@ impl AppleClient {
     /// 一条线路也选不出来时返回 `Err`：只有直连时沿用原来的冷却提示；有多条线路
     /// 时说明每条各自还要等多久。
     ///
-    /// 有隧道代理线路时只在隧道代理里挑，直连不参与，理由见
-    /// [`ClientConfig::rotate_proxies`]。
+    /// 只用代理的模式下直连不参与（`standby`），理由见 [`ClientConfig::proxy_mode`]；
+    /// 连不上而在暂停中的代理也不选，见 [`DOWN_COOLDOWNS`]。
     async fn pick_route(
         &self,
         region: &Region,
         tried: &[String],
     ) -> Result<(Arc<Route>, bool), ApiError> {
         let routes = self.routes.read().await.clone();
-        let rotating = routes.iter().any(|r| r.rotating);
         let n = routes.len().max(1);
         let start = self.cursor.fetch_add(1, Ordering::Relaxed) % n;
         let now = Instant::now();
@@ -1036,7 +1102,11 @@ impl AppleClient {
         for k in 0..routes.len() {
             let i = (start + k) % n;
             let route = &routes[i];
-            if tried.contains(&route.label) || (rotating && !route.rotating) {
+            if tried.contains(&route.label) || route.standby {
+                continue;
+            }
+            if let Some(left) = route.down_left(now).await {
+                unavailable.push((route.label.clone(), RouteAvailability::Down(left)));
                 continue;
             }
             match route.blocks.lock().await.availability(region.locale, now) {
@@ -1076,26 +1146,57 @@ impl AppleClient {
         }
         let mut parts: Vec<String> = Vec::new();
         let mut soonest: Option<Duration> = None;
+        let (mut cooling, mut probing, mut down) = (0usize, 0usize, 0usize);
         for (label, state) in &unavailable {
             match state {
                 RouteAvailability::Cooling(left) => {
+                    cooling += 1;
                     parts.push(format!("{label} {}", human_duration(*left)));
                     soonest = Some(soonest.map_or(*left, |s| s.min(*left)));
                 }
-                RouteAvailability::Probing => parts.push(format!("{label} 探测中")),
+                RouteAvailability::Down(left) => {
+                    down += 1;
+                    parts.push(format!("{label} 连不上，{}后再试", human_duration(*left)));
+                    soonest = Some(soonest.map_or(*left, |s| s.min(*left)));
+                }
+                RouteAvailability::Probing => {
+                    probing += 1;
+                    parts.push(format!("{label} 探测中"));
+                }
                 RouteAvailability::Free => {}
             }
         }
+        let mut retried = 0usize;
         for label in tried {
             if !parts.iter().any(|p| p.starts_with(label.as_str())) {
+                retried += 1;
                 parts.push(format!("{label} 本轮已试过"));
             }
         }
-        let when = soonest.map_or("探测结束".to_string(), human_duration);
-        Err(ApiError::Blocked(format!(
-            "所有线路都不可用（{}），{when}后自动重试",
+        // 几十条线路时逐条列出来没人看得完，只报各种情况各有几条。
+        let detail = if parts.len() <= 4 {
             parts.join("、")
-        )))
+        } else {
+            [
+                (cooling, "条被拦冷却中"),
+                (down, "条连不上暂停中"),
+                (probing, "条探测中"),
+                (retried, "条本轮已试过"),
+            ]
+            .iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, what)| format!("{count} {what}"))
+            .collect::<Vec<_>>()
+            .join("、")
+        };
+        let when = soonest.map_or("探测结束".to_string(), human_duration);
+        let text = format!("所有线路都不可用（{detail}），{when}后自动重试");
+        // 没有一条是被 Apple 拦下的，那就是代理自己连不上，不能报成「被拦截」。
+        if cooling == 0 && probing == 0 && down > 0 {
+            Err(ApiError::Transport(text))
+        } else {
+            Err(ApiError::Blocked(text))
+        }
     }
 
     /// 查询 `store_number` 门店中 `parts` 各型号的可取货状态。
@@ -1172,10 +1273,10 @@ impl AppleClient {
         // 隧道代理的出口 IP 本次已被拦了几次。
         let mut rotated = 0u32;
 
-        // 每条线路本次最多试一次：被拦或代理不通就换下一条，全试完才把最后的错误
-        // 交出去。只有直连时和以前完全一样：一次请求，被拦就冷却。隧道代理被拦时
-        // 留在原线路换 IP 再试，所以循环上限多出 ROTATE_RETRIES 次。
-        for _ in 0..attempts + ROTATE_RETRIES as usize {
+        // 每条线路本次最多试一次：被拦或代理不通就换下一条，试完或试满 MAX_ATTEMPTS
+        // 次才把最后的错误交出去。只有直连时和以前完全一样：一次请求，被拦就冷却。
+        // 隧道代理被拦时留在原线路换 IP 再试。
+        for _ in 0..MAX_ATTEMPTS {
             if tried.len() >= attempts {
                 break;
             }
@@ -1217,13 +1318,14 @@ impl AppleClient {
             match result {
                 Ok(body) => {
                     self.clear_block(&route, region, probing).await;
+                    route.mark_up().await;
                     return Ok(body);
                 }
                 // 隧道代理：被拦的只是刚才那个出口 IP，下次新建连接就是另一个 IP，
                 // 所以不冷却整条线路，直接换 IP 再查。
                 Err(ApiError::Blocked(detail)) if route.rotating => {
                     rotated += 1;
-                    if rotated > ROTATE_RETRIES {
+                    if rotated >= MAX_ATTEMPTS {
                         return Err(ApiError::Blocked(format!(
                             "隧道代理连换 {rotated} 个出口 IP 都被拦截（最后一次：{detail}），\
                              这家代理的 IP 可能已被 Apple 盯上，可换一家代理或改用住宅 IP"
@@ -1252,14 +1354,19 @@ impl AppleClient {
                     outcomes.push(text.clone());
                     last_err = Some(ApiError::Blocked(text));
                 }
-                // 代理连不上、握手失败之类：这条线路的问题，换一条；直连的网络错误
-                // 则照旧直接报出去（换代理解决不了本机断网）。
+                // 代理连不上、握手失败之类：这条线路的问题，换一条，并暂停这条线路一会儿；
+                // 直连的网络错误则照旧直接报出去（换代理解决不了本机断网）。隧道代理
+                // 不暂停：坏的可能只是这一次分到的出口，下一次连接就换了。
                 Err(err @ ApiError::Transport(_)) if route.is_proxy() && multi => {
                     tried.push(route.label.clone());
                     if probing {
                         self.end_probe(&route, region).await;
                     }
-                    let text = describe_proxy_failure(&route, &err);
+                    let mut text = describe_proxy_failure(&route, &err);
+                    if !route.rotating {
+                        let pause = route.mark_down(Instant::now()).await;
+                        text.push_str(&format!("；这条线路暂停 {}", human_duration(pause)));
+                    }
                     outcomes.push(text.clone());
                     last_err = Some(ApiError::Transport(text));
                 }

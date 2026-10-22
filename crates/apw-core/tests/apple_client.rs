@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use apw_core::apple::{ApiError, AppleClient, ClientConfig, RequestProfile, Transport, WarmPage};
+use apw_core::apple::{
+    ApiError, AppleClient, ClientConfig, ProxyMode, RequestProfile, Transport, WarmPage,
+};
 use apw_core::model::{Category, Family, Region};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -797,11 +799,22 @@ async fn 代理连不上时换下一条线路且报的是代理的错() {
     assert_eq!(routes[1].0, "proxy#1");
     assert_eq!(routes[1].1, "transport");
 
-    // 直连在冷却，第二次只会去撞那个不通的代理，不会再碰直连。
-    let _ = client.pickup_message(region, "R102", &part).await;
+    assert!(text.contains("暂停 30 秒"), "连不上的代理要先暂停：{text}");
+
+    // 直连在冷却、代理在暂停：第二次一个请求都不发，说清各自还要等多久。
+    let err = client
+        .pickup_message(region, "R102", &part)
+        .await
+        .expect_err("两条线路都不可用");
+    let text = err.to_string();
+    assert!(text.contains("所有线路都不可用"), "{text}");
+    assert!(text.contains("proxy#1 连不上"), "{text}");
     let routes = pickup_routes(&client.recent_requests().await);
-    assert_eq!(routes.len(), 3, "{routes:?}");
-    assert_eq!(routes[2].0, "proxy#1");
+    assert_eq!(
+        routes.len(),
+        2,
+        "暂停中的代理和冷却中的直连都不该再碰：{routes:?}"
+    );
 }
 
 #[tokio::test]
@@ -815,7 +828,7 @@ async fn 无效的代理地址在构造和更换时都报错且原线路不动()
 
     let client = fast(ClientConfig::default());
     let err = client
-        .set_proxies(&["::nope".to_string()], false)
+        .set_proxies(&["::nope".to_string()], ProxyMode::Mixed)
         .await
         .expect_err("换成坏地址应当失败");
     assert!(err.to_string().contains("代理地址无效"), "{err}");
@@ -842,7 +855,7 @@ async fn 换代理立即生效并按线路各自记预算() {
     });
     assert_eq!(client.route_labels().await, ["direct"]);
     client
-        .set_proxies(&[proxy.url()], false)
+        .set_proxies(&[proxy.url()], ProxyMode::Mixed)
         .await
         .expect("加代理");
     assert_eq!(client.route_labels().await, ["direct", "proxy#1"]);
@@ -890,7 +903,7 @@ async fn 换代理立即生效并按线路各自记预算() {
 fn rotating(proxy: &FakeProxy) -> ClientConfig {
     ClientConfig {
         proxies: vec![proxy.url()],
-        rotate_proxies: true,
+        proxy_mode: ProxyMode::Tunnel,
         max_retries: 0,
         ..ClientConfig::default()
     }
@@ -1063,7 +1076,7 @@ async fn 隧道代理连不上时报代理的错且不退回直连() {
     let region = apple.region();
     let client = fast(ClientConfig {
         proxies: vec![dead_proxy_url().await],
-        rotate_proxies: true,
+        proxy_mode: ProxyMode::Tunnel,
         warm_page: WarmPage::None,
         max_retries: 0,
         ..ClientConfig::default()
@@ -1097,7 +1110,7 @@ async fn 运行中打开隧道代理模式立即生效且直连退出轮换() {
         ..ClientConfig::default()
     });
     client
-        .set_proxies(&[proxy.url()], true)
+        .set_proxies(&[proxy.url()], ProxyMode::Tunnel)
         .await
         .expect("换成隧道代理");
     assert_eq!(client.route_labels().await, ["direct", "proxy#1"]);
@@ -1118,4 +1131,132 @@ async fn 运行中打开隧道代理模式立即生效且直连退出轮换() {
         ["proxy#1", "proxy#1", "proxy#1", "proxy#1"],
         "直连不再参与轮换"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 代理轮流：每个代理一个固定出口（机场节点每个开一个本地端口）
+// ---------------------------------------------------------------------------
+
+fn pool(proxies: Vec<String>) -> ClientConfig {
+    ClientConfig {
+        proxies,
+        proxy_mode: ProxyMode::Pool,
+        warm_page: WarmPage::None,
+        max_retries: 0,
+        ..ClientConfig::default()
+    }
+}
+
+/// 经 `p1` 来的取货查询一律 541，其余正常：模拟某一个节点的 IP 被 Apple 拦了。
+fn blocked_via_p1(path: &str) -> (u16, Vec<(String, String)>, String) {
+    if path.starts_with(PICKUP_PATH) && path.contains("via=p1") {
+        return blocked_page();
+    }
+    healthy(path)
+}
+
+#[tokio::test]
+async fn 代理轮流时被拦的线路单独冷却且不碰直连() {
+    let apple = FakeApple::start(blocked_via_p1).await;
+    let p1 = FakeProxy::start("p1").await;
+    let p2 = FakeProxy::start("p2").await;
+    let region = apple.region();
+    let client = fast(pool(vec![p1.url(), p2.url()]));
+    let part = ["MG724CH/A".to_string()];
+
+    for store in ["R101", "R102", "R103"] {
+        client
+            .pickup_message(region, store, &part)
+            .await
+            .expect("被拦的节点之外还有能用的");
+    }
+    let pickups = apple.requests(PICKUP_PATH);
+    assert!(
+        pickups.iter().all(|p| p.path.contains("via=")),
+        "本机直连一次都不该用：{pickups:?}"
+    );
+    assert_eq!(p1.hits(), 1, "被拦一次就进冷却，之后不再去碰");
+    assert_eq!(p2.hits(), 3);
+}
+
+#[tokio::test]
+async fn 代理轮流时连不上的代理暂停使用() {
+    let apple = FakeApple::start(healthy).await;
+    let p2 = FakeProxy::start("p2").await;
+    let region = apple.region();
+    let client = fast(pool(vec![dead_proxy_url().await, p2.url()]));
+    let part = ["MG724CH/A".to_string()];
+
+    for store in ["R101", "R102", "R103"] {
+        client
+            .pickup_message(region, store, &part)
+            .await
+            .expect("还有一个代理能用");
+    }
+    let routes = pickup_routes(&client.recent_requests().await);
+    assert_eq!(
+        routes,
+        [
+            ("proxy#1".to_string(), "transport".to_string()),
+            ("proxy#2".to_string(), "ok".to_string()),
+            ("proxy#2".to_string(), "ok".to_string()),
+            ("proxy#2".to_string(), "ok".to_string()),
+        ],
+        "连不上的代理暂停期间不再去连"
+    );
+}
+
+#[tokio::test]
+async fn 代理都连不上时报网络错误而不是被拦且不碰直连() {
+    let apple = FakeApple::start(healthy).await;
+    let region = apple.region();
+    let client = fast(pool(vec![dead_proxy_url().await, dead_proxy_url().await]));
+    let part = ["MG724CH/A".to_string()];
+
+    for store in ["R101", "R102"] {
+        let err = client
+            .pickup_message(region, store, &part)
+            .await
+            .expect_err("代理全都连不上");
+        assert!(matches!(err, ApiError::Transport(_)), "{err}");
+    }
+    assert!(
+        apple.requests(PICKUP_PATH).is_empty(),
+        "本机直连一次都不该用"
+    );
+}
+
+#[tokio::test]
+async fn 一次查询最多试三条线路且线路多时提示只报数量() {
+    let apple = FakeApple::start(blocked_always).await;
+    let mut proxies = Vec::new();
+    for name in ["p1", "p2", "p3", "p4", "p5", "p6"] {
+        proxies.push(FakeProxy::start(name).await);
+    }
+    let region = apple.region();
+    let client = fast(pool(proxies.iter().map(FakeProxy::url).collect()));
+    let part = ["MG724CH/A".to_string()];
+
+    let err = client
+        .pickup_message(region, "R101", &part)
+        .await
+        .expect_err("全部被拦");
+    assert!(matches!(err, ApiError::Blocked(_)), "{err}");
+    assert_eq!(
+        apple.requests(PICKUP_PATH).len(),
+        3,
+        "一次查询只试三条，不把六个 IP 一口气全撞一遍"
+    );
+
+    let _ = client.pickup_message(region, "R102", &part).await;
+    assert_eq!(apple.requests(PICKUP_PATH).len(), 6);
+
+    let err = client
+        .pickup_message(region, "R103", &part)
+        .await
+        .expect_err("六条都在冷却");
+    let text = err.to_string();
+    assert!(text.contains("6 条被拦冷却中"), "{text}");
+    assert!(!text.contains("proxy#1"), "几十条线路时不逐条列：{text}");
+    assert_eq!(apple.requests(PICKUP_PATH).len(), 6, "冷却期间不再发请求");
 }

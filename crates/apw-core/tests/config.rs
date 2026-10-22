@@ -91,7 +91,7 @@ fn 样例设置() -> Settings {
         sound_enabled: false,
         open_bag_on_hit: true,
         proxies: Vec::new(),
-        rotate_proxies: false,
+        proxy_mode: apw_core::apple::ProxyMode::Mixed,
     }
 }
 
@@ -502,7 +502,7 @@ fn 设置的线上格式是小驼峰() {
         "soundEnabled",
         "openBagOnHit",
         "proxies",
-        "rotateProxies",
+        "proxyMode",
     ] {
         assert!(obj.contains_key(key), "缺少字段 {key}：{value}");
     }
@@ -593,8 +593,9 @@ fn 代理地址只留合法的并去重() {
     )
     .expect("旧配置应当可读");
     assert!(old.proxies.is_empty());
-    assert!(
-        !old.rotate_proxies,
+    assert_eq!(
+        old.proxy_mode,
+        apw_core::apple::ProxyMode::Mixed,
         "旧配置没有换 IP 开关，读上来必须是关闭"
     );
 }
