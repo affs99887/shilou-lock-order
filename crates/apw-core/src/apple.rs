@@ -226,6 +226,12 @@ const BLOCK_COOLDOWNS: [Duration; 4] = [
     Duration::from_secs(30 * 60),
 ];
 
+/// 隧道代理模式下，一次查询里出口 IP 被拦后最多再换几次 IP 重查。
+///
+/// 换 IP 只要新建一条连接，比整条线路冷却几分钟划算；但代理商的 IP 整批被盯上时
+/// 换多少次都一样，所以封顶，之后交给引擎的整轮退避去放慢。
+const ROTATE_RETRIES: u32 = 2;
+
 /// 保留最近多少条出站请求记录，供诊断命令和日志使用。
 const RECENT_RECORDS: usize = 256;
 
@@ -420,11 +426,19 @@ enum RouteAvailability {
 /// Apple 的配额按出口 IP 计（见 [`Budget`]），所以每条线路各有自己的传输层与
 /// cookie 罐、暖场状态、冷却账本和令牌桶，互不相干。请求在可用线路之间轮流走，
 /// 某条被拦就换下一条继续 —— issue #37 要的「541 后切换代理」。
+///
+/// 隧道代理线路（`rotating`）例外：它每次查询都新建传输层和 cookie 罐，出口 IP
+/// 跟着换，所以不用这条线路自己的暖场状态（`warm`）、被拦冷却（`blocks`）和
+/// 请求预算（`budget`）。
 struct Route {
     /// 给日志和请求记录看的名字：`direct`，或 `proxy#1`（不含账号密码）。
     label: String,
     /// 代理线路的地址，去掉了账号密码，出错时告诉用户是哪个代理连不上；直连为 `None`。
     endpoint: Option<String>,
+    /// 代理的原始地址（可能带账号密码），隧道代理每次查询用它新建会话。**不要打印它**。
+    proxy: Option<String>,
+    /// 隧道代理：代理商按连接分配出口 IP，每次查询新建连接就换一个 IP。
+    rotating: bool,
     http: Http,
     warm: Mutex<HashMap<String, WarmState>>,
     blocks: Mutex<BlockTracker>,
@@ -432,10 +446,17 @@ struct Route {
 }
 
 impl Route {
-    fn build(config: &ClientConfig, label: String, proxy: Option<&str>) -> Result<Self, ApiError> {
+    fn build(
+        config: &ClientConfig,
+        label: String,
+        proxy: Option<&str>,
+        rotating: bool,
+    ) -> Result<Self, ApiError> {
         Ok(Self {
             label,
             endpoint: proxy.map(redact_proxy),
+            proxy: proxy.map(str::to_string),
+            rotating: rotating && proxy.is_some(),
             http: Http::build(config, proxy)?,
             warm: Mutex::new(HashMap::new()),
             blocks: Mutex::new(BlockTracker::default()),
@@ -446,6 +467,26 @@ impl Route {
     fn is_proxy(&self) -> bool {
         self.label != "direct"
     }
+
+    /// 这次查询用的传输层。隧道代理每次新建一个：新连接拿到新的出口 IP，空的
+    /// cookie 罐意味着新会话，Apple 按 IP、按会话记的次数都从零开始。其余线路
+    /// 共用自己那一份，连接和 cookie 照常复用。
+    fn session(&self, config: &ClientConfig) -> Result<Http, ApiError> {
+        if self.rotating {
+            Http::build(config, self.proxy.as_deref())
+        } else {
+            Ok(self.http.clone())
+        }
+    }
+
+    /// 按这条线路的预算，再发 `requests` 次要先等多久。隧道代理每次都是新 IP，
+    /// 按 IP 记的预算对它没有意义，不计。
+    async fn budget_wait(&self, budget: &Budget, now: Instant, requests: usize) -> Duration {
+        if self.rotating {
+            return Duration::ZERO;
+        }
+        self.budget.lock().await.wait_for(budget, now, requests)
+    }
 }
 
 impl std::fmt::Debug for Route {
@@ -455,9 +496,19 @@ impl std::fmt::Debug for Route {
 }
 
 /// 直连排第一，之后每个代理一条线路。空白项跳过；地址不合法就整体报错，
-/// 而不是悄悄少一条线路让用户以为代理在生效。
-fn build_routes(config: &ClientConfig, proxies: &[String]) -> Result<Vec<Arc<Route>>, ApiError> {
-    let mut routes = vec![Arc::new(Route::build(config, "direct".into(), None)?)];
+/// 而不是悄悄少一条线路让用户以为代理在生效。`rotate` 为真时代理线路都按隧道
+/// 代理处理，见 [`ClientConfig::rotate_proxies`]。
+fn build_routes(
+    config: &ClientConfig,
+    proxies: &[String],
+    rotate: bool,
+) -> Result<Vec<Arc<Route>>, ApiError> {
+    let mut routes = vec![Arc::new(Route::build(
+        config,
+        "direct".into(),
+        None,
+        false,
+    )?)];
     let mut n = 0usize;
     for proxy in proxies {
         let proxy = proxy.trim();
@@ -470,6 +521,7 @@ fn build_routes(config: &ClientConfig, proxies: &[String]) -> Result<Vec<Arc<Rou
             config,
             format!("proxy#{n}"),
             Some(proxy),
+            rotate,
         )?));
     }
     Ok(routes)
@@ -613,6 +665,19 @@ pub struct ClientConfig {
     /// 换下一条继续查，见 [`AppleClient::query`]。Apple 的配额按出口 IP 计，多一条
     /// 线路就多一份配额 —— 这是 issue #37 要的。为空则只有直连。
     pub proxies: Vec<String>,
+    /// 把代理当作「每次请求换 IP」的隧道代理（代理商按连接分配出口 IP）。
+    ///
+    /// Apple 按出口 IP、按会话累计取货查询的次数（见 [`Budget`]），同一个 IP 上
+    /// 几秒一次查询，几分钟就会被拦。打开后：
+    ///
+    /// - 每次查询新建连接和 cookie 罐，暖场与查询走同一条连接，出口 IP 和会话
+    ///   一起换新，次数攒不起来；
+    /// - 代理线路不计预算；某个 IP 被拦不冷却整条线路，立刻换 IP 重查，最多
+    ///   [`ROTATE_RETRIES`] 次；
+    /// - **直连不再参与**：本机 IP 要留给浏览器里的选购，快节奏查询不能把它烧掉。
+    ///
+    /// 代价是每次查询多一次暖场请求（流量约多一个购物袋页面）。没有代理时无效。
+    pub rotate_proxies: bool,
 }
 
 impl Default for ClientConfig {
@@ -626,6 +691,7 @@ impl Default for ClientConfig {
             transport: Transport::default_for_build(),
             budget: Budget::default(),
             proxies: Vec::new(),
+            rotate_proxies: false,
         }
     }
 }
@@ -707,7 +773,7 @@ pub struct AppleClient {
 
 impl AppleClient {
     pub fn new(config: ClientConfig) -> Result<Self, ApiError> {
-        let routes = build_routes(&config, &config.proxies)?;
+        let routes = build_routes(&config, &config.proxies, config.rotate_proxies)?;
         Ok(Self {
             routes: Arc::new(RwLock::new(routes)),
             cursor: Arc::new(AtomicUsize::new(0)),
@@ -718,9 +784,10 @@ impl AppleClient {
     }
 
     /// 换一套代理，立即生效，不用重建客户端。线路全部重建：cookie、暖场、冷却和
-    /// 预算都从头来 —— 改代理本来就意味着换了出口。地址解析不了返回错误，原线路不动。
-    pub async fn set_proxies(&self, proxies: &[String]) -> Result<(), ApiError> {
-        let routes = build_routes(&self.config, proxies)?;
+    /// 预算都从头来 —— 改代理本来就意味着换了出口。`rotate` 含义同
+    /// [`ClientConfig::rotate_proxies`]。地址解析不了返回错误，原线路不动。
+    pub async fn set_proxies(&self, proxies: &[String], rotate: bool) -> Result<(), ApiError> {
+        let routes = build_routes(&self.config, proxies, rotate)?;
         *self.routes.write().await = routes;
         self.cursor.store(0, Ordering::Relaxed);
         Ok(())
@@ -755,11 +822,7 @@ impl AppleClient {
         let now = Instant::now();
         let mut best: Option<Duration> = None;
         for route in &routes {
-            let wait = route
-                .budget
-                .lock()
-                .await
-                .wait_for(&self.config.budget, now, requests);
+            let wait = route.budget_wait(&self.config.budget, now, requests).await;
             best = Some(best.map_or(wait, |b| b.min(wait)));
         }
         best.unwrap_or(Duration::ZERO)
@@ -825,10 +888,8 @@ impl AppleClient {
     ///    不再重试暖场。让一次辅助请求的失败去决定库存判定，正是这个项目最不该
     ///    有的东西。
     async fn ensure_warm(&self, route: &Route, region: &Region) {
-        let url = match self.config.warm_page {
-            WarmPage::Bag => region.bag_url(),
-            WarmPage::BuyPage => region.default_buy_page_url(),
-            WarmPage::None => return,
+        let Some(url) = self.warm_url(region) else {
+            return;
         };
 
         let mut states = route.warm.lock().await;
@@ -843,12 +904,32 @@ impl AppleClient {
         }
         state.last_attempt = Some(Instant::now());
 
+        if self.warm_once(route, &route.http, region, &url).await {
+            state.warmed = true;
+            state.failures = 0;
+        } else {
+            state.failures = state.failures.saturating_add(1);
+        }
+    }
+
+    /// 暖场取哪一页；不暖场时为 `None`。
+    fn warm_url(&self, region: &Region) -> Option<String> {
+        match self.config.warm_page {
+            WarmPage::Bag => Some(region.bag_url()),
+            WarmPage::BuyPage => Some(region.default_buy_page_url()),
+            WarmPage::None => None,
+        }
+    }
+
+    /// 用 `http` 取一次暖场页并留下请求记录。返回罐里是否真的攒到了对取货接口
+    /// 生效的 cookie —— 页面 2xx 不算数，见 [`Self::ensure_warm`]。
+    async fn warm_once(&self, route: &Route, http: &Http, region: &Region, url: &str) -> bool {
         self.throttle(route).await;
         let started = Instant::now();
         let mut record = RequestRecord {
             at_ms: now_ms(),
             kind: "warm",
-            transport: route.http.label(),
+            transport: http.label(),
             route: route.label.clone(),
             locale: region.locale.to_string(),
             store: None,
@@ -858,28 +939,27 @@ impl AppleClient {
             http_version: None,
             duration_ms: 0,
             outcome: String::new(),
-            cookies_sent: route.http.cookie_names_for(&url),
+            cookies_sent: http.cookie_names_for(url),
             cookies_after: Vec::new(),
             final_url: None,
         };
 
-        let sent = route
-            .http
+        let sent = http
             .fetch(
-                &url,
+                url,
                 &[],
                 navigation_headers(&self.config.profile, region),
                 MAX_WARM_BYTES,
             )
             .await;
-        match sent {
+        let warmed = match sent {
             Ok(fetched) => {
                 // 响应体已经读掉（连接才能复用），内容本身用不上。
                 let status = fetched.status;
                 record.status = Some(status);
                 record.http_version = Some(fetched.version);
                 record.final_url = Some(fetched.final_url);
-                let names = route.http.cookie_names_for(&region.pickup_message_url());
+                let names = http.cookie_names_for(&region.pickup_message_url());
                 let ok = (200..300).contains(&status) && !names.is_empty();
                 record.cookies_after = names;
                 record.outcome = if ok {
@@ -889,21 +969,16 @@ impl AppleClient {
                 } else {
                     "http_error".into()
                 };
-                if ok {
-                    state.warmed = true;
-                    state.failures = 0;
-                } else {
-                    state.failures = state.failures.saturating_add(1);
-                }
+                ok
             }
             Err(err) => {
                 record.outcome = format!("transport: {err}");
-                state.failures = state.failures.saturating_add(1);
+                false
             }
-        }
+        };
         record.duration_ms = started.elapsed().as_millis() as u64;
-        drop(states);
         self.push_record(record).await;
+        warmed
     }
 
     /// 忘掉某地区的暖场标记，下一次会重新取页面。
@@ -942,12 +1017,16 @@ impl AppleClient {
     ///
     /// 一条线路也选不出来时返回 `Err`：只有直连时沿用原来的冷却提示；有多条线路
     /// 时说明每条各自还要等多久。
+    ///
+    /// 有隧道代理线路时只在隧道代理里挑，直连不参与，理由见
+    /// [`ClientConfig::rotate_proxies`]。
     async fn pick_route(
         &self,
         region: &Region,
         tried: &[String],
     ) -> Result<(Arc<Route>, bool), ApiError> {
         let routes = self.routes.read().await.clone();
+        let rotating = routes.iter().any(|r| r.rotating);
         let n = routes.len().max(1);
         let start = self.cursor.fetch_add(1, Ordering::Relaxed) % n;
         let now = Instant::now();
@@ -957,16 +1036,12 @@ impl AppleClient {
         for k in 0..routes.len() {
             let i = (start + k) % n;
             let route = &routes[i];
-            if tried.contains(&route.label) {
+            if tried.contains(&route.label) || (rotating && !route.rotating) {
                 continue;
             }
             match route.blocks.lock().await.availability(region.locale, now) {
                 RouteAvailability::Free => {
-                    let wait = route
-                        .budget
-                        .lock()
-                        .await
-                        .wait_for(&self.config.budget, now, 1);
+                    let wait = route.budget_wait(&self.config.budget, now, 1).await;
                     ranked.push((i, wait));
                 }
                 other => unavailable.push((route.label.clone(), other)),
@@ -1094,18 +1169,40 @@ impl AppleClient {
         // 本轮每条线路各自的下场。全部失败时一起报出去：只报最后一条，用户会以为
         // 前面那几条根本没用上（#37 里就有人问「为什么一直看不到 proxy#1」）。
         let mut outcomes: Vec<String> = Vec::new();
+        // 隧道代理的出口 IP 本次已被拦了几次。
+        let mut rotated = 0u32;
 
         // 每条线路本次最多试一次：被拦或代理不通就换下一条，全试完才把最后的错误
-        // 交出去。只有直连时和以前完全一样：一次请求，被拦就冷却。
-        for _ in 0..attempts {
+        // 交出去。只有直连时和以前完全一样：一次请求，被拦就冷却。隧道代理被拦时
+        // 留在原线路换 IP 再试，所以循环上限多出 ROTATE_RETRIES 次。
+        for _ in 0..attempts + ROTATE_RETRIES as usize {
+            if tried.len() >= attempts {
+                break;
+            }
             let (route, probing) = match self.pick_route(region, &tried).await {
                 Ok(picked) => picked,
                 Err(err) => return Err(summarize_round(last_err.unwrap_or(err), &outcomes)),
             };
-            tried.push(route.label.clone());
+            let http = match route.session(&self.config) {
+                Ok(http) => http,
+                Err(err) => {
+                    tried.push(route.label.clone());
+                    let text = describe_proxy_failure(&route, &err);
+                    outcomes.push(text.clone());
+                    last_err = Some(ApiError::Transport(text));
+                    continue;
+                }
+            };
 
-            // 先把 cookie 攒上再查，见 ensure_warm；暖不上也照常查。
-            self.ensure_warm(&route, region).await;
+            // 先把 cookie 攒上再查，见 ensure_warm；暖不上也照常查。隧道代理的会话
+            // 是这次新建的，罐里一定是空的，每次都要暖，暖场和查询走同一条连接。
+            if route.rotating {
+                if let Some(warm) = self.warm_url(region) {
+                    self.warm_once(&route, &http, region, &warm).await;
+                }
+            } else {
+                self.ensure_warm(&route, region).await;
+            }
             let url = region.pickup_message_url();
             let outbound = Outbound {
                 url: &url,
@@ -1115,14 +1212,32 @@ impl AppleClient {
                 scope: &scope,
                 parts: parts.len(),
             };
-            let result = self.get(&route, &outbound).await;
+            let result = self.get(&route, &http, &outbound).await;
 
             match result {
                 Ok(body) => {
                     self.clear_block(&route, region, probing).await;
                     return Ok(body);
                 }
+                // 隧道代理：被拦的只是刚才那个出口 IP，下次新建连接就是另一个 IP，
+                // 所以不冷却整条线路，直接换 IP 再查。
+                Err(ApiError::Blocked(detail)) if route.rotating => {
+                    rotated += 1;
+                    if rotated > ROTATE_RETRIES {
+                        return Err(ApiError::Blocked(format!(
+                            "隧道代理连换 {rotated} 个出口 IP 都被拦截（最后一次：{detail}），\
+                             这家代理的 IP 可能已被 Apple 盯上，可换一家代理或改用住宅 IP"
+                        )));
+                    }
+                    let text = format!(
+                        "线路 {} 的出口 IP 被拦截（{detail}），已换 IP 重查",
+                        route.label
+                    );
+                    outcomes.push(text.clone());
+                    last_err = Some(ApiError::Blocked(text));
+                }
                 Err(ApiError::Blocked(detail)) => {
+                    tried.push(route.label.clone());
                     self.forget_warm(&route, region).await;
                     let cooldown = self.record_block(&route, region, probing).await;
                     let who = if multi {
@@ -1140,6 +1255,7 @@ impl AppleClient {
                 // 代理连不上、握手失败之类：这条线路的问题，换一条；直连的网络错误
                 // 则照旧直接报出去（换代理解决不了本机断网）。
                 Err(err @ ApiError::Transport(_)) if route.is_proxy() && multi => {
+                    tried.push(route.label.clone());
                     if probing {
                         self.end_probe(&route, region).await;
                     }
@@ -1185,13 +1301,18 @@ impl AppleClient {
         Ok(fetched.version)
     }
 
-    /// 执行一次带限速与退避重试的 GET，返回响应体。
-    async fn get(&self, route: &Route, req: &Outbound<'_>) -> Result<Vec<u8>, ApiError> {
+    /// 用 `http`（见 [`Route::session`]）执行一次带限速与退避重试的 GET，返回响应体。
+    async fn get(
+        &self,
+        route: &Route,
+        http: &Http,
+        req: &Outbound<'_>,
+    ) -> Result<Vec<u8>, ApiError> {
         with_retry(self.config.max_retries, || async {
             // 限速放在重试循环内部：每一次真正的出站请求都要排队，
             // 重试不该成为绕过全局节流的后门。
             self.throttle(route).await;
-            self.get_once(route, req).await
+            self.get_once(route, http, req).await
         })
         .await
     }
@@ -1212,7 +1333,10 @@ impl AppleClient {
             *last = Some(slot);
             slot
         };
-        let budget_slot = {
+        let budget_slot = if route.rotating {
+            // 隧道代理每次都是新出口 IP，不从按 IP 记的预算里扣。
+            Instant::now()
+        } else {
             let now = Instant::now();
             let wait = route.budget.lock().await.reserve(&self.config.budget, now);
             now + wait
@@ -1222,7 +1346,12 @@ impl AppleClient {
     }
 
     /// 执行单次 HTTP 请求，把失败归类，并留下一条请求记录。
-    async fn get_once(&self, route: &Route, req: &Outbound<'_>) -> Result<Vec<u8>, ApiError> {
+    async fn get_once(
+        &self,
+        route: &Route,
+        http: &Http,
+        req: &Outbound<'_>,
+    ) -> Result<Vec<u8>, ApiError> {
         let Outbound {
             url,
             query,
@@ -1235,7 +1364,7 @@ impl AppleClient {
         let mut record = RequestRecord {
             at_ms: now_ms(),
             kind: "pickup",
-            transport: route.http.label(),
+            transport: http.label(),
             route: route.label.clone(),
             locale: region.locale.to_string(),
             store: scope.store(),
@@ -1245,13 +1374,12 @@ impl AppleClient {
             http_version: None,
             duration_ms: 0,
             outcome: String::new(),
-            cookies_sent: route.http.cookie_names_for(url),
+            cookies_sent: http.cookie_names_for(url),
             cookies_after: Vec::new(),
             final_url: None,
         };
 
-        let sent = route
-            .http
+        let sent = http
             .fetch(
                 url,
                 query,
@@ -1276,7 +1404,7 @@ impl AppleClient {
         let content_type = fetched.content_type;
         let body = fetched.body;
         record.duration_ms = started.elapsed().as_millis() as u64;
-        record.cookies_after = route.http.cookie_names_for(url);
+        record.cookies_after = http.cookie_names_for(url);
 
         // 先看状态码：拦截页的响应体读到一半失败，也仍然是「被拦」，不能降级成网络错误。
         if let Some(err) = classify_status(status) {

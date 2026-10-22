@@ -223,6 +223,18 @@ test("navigation keeps original controls mounted and preserves target draft", ()
   assert.deepEqual(app.addedTargets, []);
 });
 
+test("settings page carries proxy lines and blocked rotation promises a new IP, not a cooldown", () => {
+  const app = renderApp();
+  const settingsPage = app.control(e => e.props?.["data-testid"] === "settings-page");
+  assert.ok([settingsPage.children].flat().some(e => e?.type === "ProxySettings"));
+  const hint = () => app.all(e => e.type === "p" && typeof e.props.children === "string" &&
+    e.props.children.startsWith("受影响的库存状态为未知。"))[0].props.children;
+  app.state.trouble = { reason: "查询失败：HTTP 541", advice: "try_another_network" };
+  assert.match(hint(), /等待冷却结束/);
+  app.state.settings = { ...app.state.settings, proxies: ["http://user:pass@tunnel.example:15818"], rotateProxies: true };
+  assert.match(hint(), /换新的出口 IP/);
+});
+
 const K1 = "https://api.day.app/k1";
 const K2 = "https://api.day.app/k2";
 const F1 = "https://open.feishu.cn/open-apis/bot/v2/hook/f1";

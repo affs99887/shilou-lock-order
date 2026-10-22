@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "拾漏锁单",
-  "version": "0.6.2-minute.7",
+  "version": "0.6.2-rotate5s.1",
   "identifier": "local.apple-pickup-watcher.auto",
   "build": {
     "beforeDevCommand": "npm run dev",

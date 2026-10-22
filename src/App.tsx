@@ -18,6 +18,7 @@ import {
 
 import { Combobox } from "@/components/Combobox";
 import { BarkSettings } from "@/components/BarkSettings";
+import { ProxySettings } from "@/components/ProxySettings";
 import { AutoCheckout } from "@/components/AutoCheckout";
 import { useInventoryPurchase } from "@/lib/inventory-purchase";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -243,7 +244,7 @@ export default function App() {
     { id: "center", label: "捡漏中心", icon: Radar, caption: "实时库存与运行记录" },
     { id: "targets", label: "监控目标", icon: ListFilter, caption: "选择门店、机型与配置" },
     { id: "plan", label: "选购方案", icon: LockKeyhole, caption: "预算、分期与下单方式" },
-    { id: "settings", label: "手机提醒", icon: SlidersHorizontal, caption: "Bark 通知地址" },
+    { id: "settings", label: "手机提醒", icon: SlidersHorizontal, caption: "Bark 通知与代理线路" },
   ] as const;
   const storeOptions = useMemo(
     () => ui.stores.map((s) => ({ value: s.number, label: s.title })),
@@ -395,7 +396,11 @@ export default function App() {
             className="border-unknown/30 bg-unknown/5 grid gap-1.5 rounded-lg border px-4 py-3 text-sm">
             <p className="text-unknown font-medium">库存查询受阻</p>
             <p className="break-words">{ui.trouble.reason}</p>
-            <p className="text-muted-foreground">受影响的库存状态为未知。程序会等待冷却结束后再尝试查询。</p>
+            <p className="text-muted-foreground">
+              {ui.settings.rotateProxies && (ui.settings.proxies?.length ?? 0) > 0
+                ? "受影响的库存状态为未知。下一轮会换新的出口 IP 继续查询；一直被拦请换一家代理。"
+                : "受影响的库存状态为未知。程序会等待冷却结束后再尝试查询。"}
+            </p>
           </div>
         )}
         {ui.trouble !== null && ui.trouble.advice !== "try_another_network" && (
@@ -603,6 +608,7 @@ export default function App() {
         </div>
         <div hidden={view !== "settings"} data-testid="settings-page">
         <BarkSettings saved={ui.settings.barkUrl || ""} />
+        <ProxySettings settings={ui.settings} />
         </div>
         <div hidden={view !== "center"} data-testid="inventory-page" className="inventory-page">
         <div className="inventory-heading"><div><h2>库存一览</h2><p>型号、门店和库存状态，集中查看。</p></div><Button variant="outline" size="sm" onClick={() => setView("targets")}><Plus/>添加目标</Button></div>

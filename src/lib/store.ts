@@ -74,6 +74,7 @@ const DEFAULT_SETTINGS: Settings = {
   soundEnabled: false,
   openBagOnHit: true,
   proxies: [],
+  rotateProxies: false,
 };
 
 let state: UiState = {
@@ -285,6 +286,25 @@ export async function saveBarkAddress(barkUrl: string): Promise<void> {
     update({ settings: saved });
   } catch (err) {
     pushLog("Bark 地址保存失败，未发送测试提醒。");
+    throw err;
+  }
+}
+
+/**
+ * 保存代理线路与查询间隔，返回后端实际存下的设置。
+ *
+ * 失败时抛出，让设置面板把原因显示出来：代理没生效时界面不能显示「已保存」。
+ * 间隔由后端按规则收敛（只有隧道代理模式能低于 60 秒），以返回值为准。
+ */
+export async function saveProxySettings(
+  patch: Pick<Settings, "proxies" | "rotateProxies" | "intervalSeconds">,
+): Promise<Settings> {
+  try {
+    const saved = await invoke<Settings>("save_settings", { settings: { ...state.settings, ...patch } });
+    update({ settings: saved });
+    return saved;
+  } catch (err) {
+    pushLog(`代理设置保存失败：${String(err)}`);
     throw err;
   }
 }

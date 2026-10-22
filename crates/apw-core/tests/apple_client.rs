@@ -815,7 +815,7 @@ async fn 无效的代理地址在构造和更换时都报错且原线路不动()
 
     let client = fast(ClientConfig::default());
     let err = client
-        .set_proxies(&["::nope".to_string()])
+        .set_proxies(&["::nope".to_string()], false)
         .await
         .expect_err("换成坏地址应当失败");
     assert!(err.to_string().contains("代理地址无效"), "{err}");
@@ -841,7 +841,10 @@ async fn 换代理立即生效并按线路各自记预算() {
         ..ClientConfig::default()
     });
     assert_eq!(client.route_labels().await, ["direct"]);
-    client.set_proxies(&[proxy.url()]).await.expect("加代理");
+    client
+        .set_proxies(&[proxy.url()], false)
+        .await
+        .expect("加代理");
     assert_eq!(client.route_labels().await, ["direct", "proxy#1"]);
 
     let part = ["MG724CH/A".to_string()];
@@ -876,5 +879,243 @@ async fn 换代理立即生效并按线路各自记预算() {
         started.elapsed() >= Duration::from_millis(350),
         "两条线路额度都用完了，第三次必须等恢复：{:?}",
         started.elapsed()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 隧道代理：每次查询换一个出口 IP
+// ---------------------------------------------------------------------------
+
+/// 隧道代理模式：一个代理，不做传输层重试，请求次数一目了然。
+fn rotating(proxy: &FakeProxy) -> ClientConfig {
+    ClientConfig {
+        proxies: vec![proxy.url()],
+        rotate_proxies: true,
+        max_retries: 0,
+        ..ClientConfig::default()
+    }
+}
+
+fn blocked_page() -> (u16, Vec<(String, String)>, String) {
+    (
+        541,
+        vec![("Content-Type".into(), "text/html".into())],
+        "<html>blocked</html>".into(),
+    )
+}
+
+#[tokio::test]
+async fn 隧道代理每次查询都用新会话且不走直连() {
+    // 每次暖场发一个新名字的 cookie（s1、s2……）。会话没换的话，后一次查询会把
+    // 前面攒下的 cookie 一起带上。
+    let warms = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&warms);
+    let apple = FakeApple::start(move |path: &str| {
+        if path.starts_with(BAG_PATH) {
+            let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            return (
+                200,
+                vec![
+                    ("Content-Type".into(), "text/html".into()),
+                    ("Set-Cookie".into(), format!("s{n}=1; Path=/")),
+                ],
+                "<html></html>".into(),
+            );
+        }
+        healthy(path)
+    })
+    .await;
+    let proxy = FakeProxy::start("tunnel").await;
+    let region = apple.region();
+    let client = fast(rotating(&proxy));
+    let part = ["MG724CH/A".to_string()];
+
+    for store in ["R101", "R102", "R103"] {
+        client
+            .pickup_message(region, store, &part)
+            .await
+            .expect("经隧道代理查询");
+    }
+
+    let bags = apple.requests(BAG_PATH);
+    let pickups = apple.requests(PICKUP_PATH);
+    assert_eq!(bags.len(), 3, "每次都是新会话，每次查询前都要暖场");
+    assert_eq!(pickups.len(), 3);
+    for c in bags.iter().chain(pickups.iter()) {
+        assert!(c.path.contains("via=tunnel"), "本机直连一次都不该用：{c:?}");
+    }
+    for (i, p) in pickups.iter().enumerate() {
+        let cookie = p.header("cookie").unwrap_or_default();
+        assert!(
+            cookie.contains(&format!("s{}=1", i + 1)) && !cookie.contains(';'),
+            "只能带这次暖场攒到的 cookie，不能带上一次会话的：{p:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn 隧道代理被拦时立刻换ip重查且不冷却() {
+    // 第一个出口 IP 被拦，换一个就好。
+    let pickups = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&pickups);
+    let apple = FakeApple::start(move |path: &str| {
+        if path.starts_with(PICKUP_PATH) && counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            return blocked_page();
+        }
+        healthy(path)
+    })
+    .await;
+    let proxy = FakeProxy::start("tunnel").await;
+    let region = apple.region();
+    let client = fast(ClientConfig {
+        warm_page: WarmPage::None,
+        ..rotating(&proxy)
+    });
+    let part = ["MG724CH/A".to_string()];
+
+    client
+        .pickup_message(region, "R101", &part)
+        .await
+        .expect("被拦后换个出口 IP 应当查到");
+    assert_eq!(
+        pickup_routes(&client.recent_requests().await),
+        [
+            ("proxy#1".to_string(), "blocked".to_string()),
+            ("proxy#1".to_string(), "ok".to_string())
+        ]
+    );
+
+    client
+        .pickup_message(region, "R102", &part)
+        .await
+        .expect("隧道代理被拦一次不该让整条线路冷却");
+    assert_eq!(apple.requests(PICKUP_PATH).len(), 3);
+}
+
+#[tokio::test]
+async fn 隧道代理连换几个ip都被拦时报错但不冷却也不碰直连() {
+    let apple = FakeApple::start(blocked_always).await;
+    let proxy = FakeProxy::start("tunnel").await;
+    let region = apple.region();
+    let client = fast(ClientConfig {
+        warm_page: WarmPage::None,
+        ..rotating(&proxy)
+    });
+    let part = ["MG724CH/A".to_string()];
+
+    let err = client
+        .pickup_message(region, "R101", &part)
+        .await
+        .expect_err("每个出口 IP 都被拦");
+    // 仍按「被拦截」报，界面才会给出换网络（换代理）的建议。
+    assert!(matches!(err, ApiError::Blocked(_)), "{err}");
+    assert!(err.to_string().contains("出口 IP"), "{err}");
+    let pickups = apple.requests(PICKUP_PATH);
+    // 第一个 IP 加上换的两个。
+    assert_eq!(pickups.len(), 3, "{pickups:?}");
+    assert!(
+        pickups.iter().all(|p| p.path.contains("via=tunnel")),
+        "本机直连一次都不该用"
+    );
+
+    // 不像固定线路那样冷却几分钟：下一轮照常经隧道去查。
+    let _ = client.pickup_message(region, "R102", &part).await;
+    assert_eq!(apple.requests(PICKUP_PATH).len(), 6);
+}
+
+#[tokio::test]
+async fn 隧道代理不受单条线路的请求预算限制() {
+    use apw_core::apple::Budget;
+    let apple = FakeApple::start(healthy).await;
+    let proxy = FakeProxy::start("tunnel").await;
+    let region = apple.region();
+    let client = fast(ClientConfig {
+        budget: Budget {
+            capacity: 1,
+            refill_every: Duration::from_secs(60),
+        },
+        ..rotating(&proxy)
+    });
+    let part = ["MG724CH/A".to_string()];
+
+    let started = std::time::Instant::now();
+    for store in ["R101", "R102", "R103"] {
+        client
+            .pickup_message(region, store, &part)
+            .await
+            .expect("查询");
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "每次都是新出口 IP，不该排队等额度：{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        client.pacing_delay(3).await,
+        Duration::ZERO,
+        "引擎不该因为预算拉长查询间隔"
+    );
+}
+
+#[tokio::test]
+async fn 隧道代理连不上时报代理的错且不退回直连() {
+    let apple = FakeApple::start(healthy).await;
+    let region = apple.region();
+    let client = fast(ClientConfig {
+        proxies: vec![dead_proxy_url().await],
+        rotate_proxies: true,
+        warm_page: WarmPage::None,
+        max_retries: 0,
+        ..ClientConfig::default()
+    });
+    let part = ["MG724CH/A".to_string()];
+
+    let err = client
+        .pickup_message(region, "R101", &part)
+        .await
+        .expect_err("代理不通");
+    assert!(matches!(err, ApiError::Transport(_)), "{err}");
+    let text = err.to_string();
+    assert!(
+        text.contains("线路 proxy#1"),
+        "要说清是哪条线路不通：{text}"
+    );
+    assert!(
+        apple.requests(PICKUP_PATH).is_empty(),
+        "本机直连一次都不该用"
+    );
+}
+
+#[tokio::test]
+async fn 运行中打开隧道代理模式立即生效且直连退出轮换() {
+    let apple = FakeApple::start(healthy).await;
+    let proxy = FakeProxy::start("tunnel").await;
+    let region = apple.region();
+    let client = fast(ClientConfig {
+        warm_page: WarmPage::None,
+        max_retries: 0,
+        ..ClientConfig::default()
+    });
+    client
+        .set_proxies(&[proxy.url()], true)
+        .await
+        .expect("换成隧道代理");
+    assert_eq!(client.route_labels().await, ["direct", "proxy#1"]);
+
+    let part = ["MG724CH/A".to_string()];
+    for store in ["R101", "R102", "R103", "R104"] {
+        client
+            .pickup_message(region, store, &part)
+            .await
+            .expect("查询");
+    }
+    let used: Vec<String> = pickup_routes(&client.recent_requests().await)
+        .into_iter()
+        .map(|(route, _)| route)
+        .collect();
+    assert_eq!(
+        used,
+        ["proxy#1", "proxy#1", "proxy#1", "proxy#1"],
+        "直连不再参与轮换"
     );
 }

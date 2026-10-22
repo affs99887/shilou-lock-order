@@ -159,26 +159,29 @@ async fn save_settings(
     settings: Settings,
 ) -> Result<Settings, String> {
     let mut next = settings;
-    monitor_policy::apply(&mut next);
     next.normalize();
+    // 先规范化再套间隔策略：能不能用 5 秒间隔，要看去掉坏地址之后还有没有代理。
+    monitor_policy::apply(&mut next);
     state.catalog.attach_companions(&mut next.targets);
     state.catalog.attach_locations(&mut next.targets);
 
-    if next.targets != state.settings_snapshot().targets && state.checkout.engaged() {
+    let previous = state.settings_snapshot();
+    if next.targets != previous.targets && state.checkout.engaged() {
         return Err("请先停止自动选购，再修改监控目标；当前结账目标不会中途改变".into());
     }
 
-    // 设置里的目标列表和查询间隔要同步给引擎，否则改完设置监控还按旧的跑。
-    state.watcher.set_targets(next.targets.clone()).await;
-    state.watcher.set_interval(next.interval()).await;
-    // 代理变了就换线路，立即生效；地址解析不了就把错误报回界面，其余设置照存。
-    if next.proxies != state.settings_snapshot().proxies {
+    // 代理变了就换线路，立即生效；地址解析不了就把错误报回界面，什么都不改。
+    // 必须先于改间隔：换线路失败时，不能让 5 秒的间隔落到本机直连上。
+    if next.proxies != previous.proxies || next.rotate_proxies != previous.rotate_proxies {
         state
             .client
-            .set_proxies(&next.proxies)
+            .set_proxies(&next.proxies, next.rotate_proxies)
             .await
             .map_err(|e| format!("代理设置未生效：{e}"))?;
     }
+    // 设置里的目标列表和查询间隔要同步给引擎，否则改完设置监控还按旧的跑。
+    state.watcher.set_targets(next.targets.clone()).await;
+    state.watcher.set_interval(next.interval()).await;
 
     state.put_settings(next.clone())?;
     Ok(next)
@@ -226,11 +229,12 @@ async fn set_targets(
 
 #[tauri::command]
 async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result<u64, String> {
-    let _ = seconds;
-    let secs = monitor_policy::INTERVAL_SECONDS;
-    state.watcher.set_interval(Duration::from_secs(secs)).await;
+    // 只有隧道代理模式能调快，其余情况一律一分钟，见 monitor_policy。
     let mut next = state.settings_snapshot();
-    next.interval_seconds = secs;
+    next.interval_seconds = seconds;
+    monitor_policy::apply(&mut next);
+    let secs = next.interval_seconds;
+    state.watcher.set_interval(Duration::from_secs(secs)).await;
     state.put_settings(next)?;
     Ok(secs)
 }
@@ -724,6 +728,7 @@ pub fn run() {
 
             let client = AppleClient::new(ClientConfig {
                 proxies: settings.proxies.clone(),
+                rotate_proxies: settings.rotate_proxies,
                 ..ClientConfig::default()
             })
             .map_err(|e| format!("构造 Apple 客户端失败：{e}"))?;

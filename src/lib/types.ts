@@ -89,6 +89,11 @@ export interface Settings {
   openBagOnHit: boolean;
   /** 代理地址列表；每个代理是一条额外的出口线路，被拦时切换。可为空。 */
   proxies: string[];
+  /**
+   * 代理是「每次请求换 IP」的隧道代理：每次查询换一个出口 IP，本机直连不参与，
+   * 查询间隔可以调到 5 秒。没有代理时不起作用。
+   */
+  rotateProxies: boolean;
 }
 
 /** 监控目标的唯一键，与 Rust 侧 Target::key 的构成保持一致。 */

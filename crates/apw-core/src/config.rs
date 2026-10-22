@@ -153,6 +153,10 @@ pub struct Settings {
     /// 切换（见 [`crate::apple::ClientConfig::proxies`]）。只保留能解析、协议为
     /// http / https / socks5 / socks5h 的地址。
     pub proxies: Vec<String>,
+    /// 代理是「每次请求换 IP」的隧道代理：每次查询换一个出口 IP，直连不参与（见
+    /// [`crate::apple::ClientConfig::rotate_proxies`]）。没有代理时不起作用。旧配置
+    /// 没有这个字段，读上来是关闭。
+    pub rotate_proxies: bool,
 }
 
 /// 内置地区表里的第一个 locale，作为兜底取值。
@@ -173,6 +177,7 @@ impl Default for Settings {
             sound_enabled: true,
             open_bag_on_hit: true,
             proxies: Vec::new(),
+            rotate_proxies: false,
         }
     }
 }
@@ -684,6 +689,7 @@ impl LegacySettings {
             open_bag_on_hit: self.open_bag_on_hit.unwrap_or(fallback.open_bag_on_hit),
             // Go 版没有代理设置，迁移过来的文件一律从空开始。
             proxies: fallback.proxies,
+            rotate_proxies: fallback.rotate_proxies,
         };
         settings.normalize();
         settings

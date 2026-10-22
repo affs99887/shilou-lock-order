@@ -51,6 +51,11 @@ pub enum Command {
         /// switched to when a route gets HTTP 541.
         #[arg(long, value_delimiter = ',')]
         proxy: Vec<String>,
+        /// Treat every --proxy as a rotating tunnel proxy: each query opens a fresh
+        /// connection and cookie session (new egress IP) and the direct connection is
+        /// never used.
+        #[arg(long, requires = "proxy")]
+        rotate_proxies: bool,
         /// Overall deadline in seconds, including reading target input.
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=86400))]
         timeout: u64,
@@ -64,6 +69,11 @@ pub enum Command {
         /// switched to when a route gets HTTP 541.
         #[arg(long, value_delimiter = ',')]
         proxy: Vec<String>,
+        /// Treat every --proxy as a rotating tunnel proxy: each query opens a fresh
+        /// connection and cookie session (new egress IP) and the direct connection is
+        /// never used.
+        #[arg(long, requires = "proxy")]
+        rotate_proxies: bool,
         /// Base interval in seconds; engine jitter and failure backoff still apply.
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(5..=86400))]
         interval: u64,

@@ -91,6 +91,7 @@ fn 样例设置() -> Settings {
         sound_enabled: false,
         open_bag_on_hit: true,
         proxies: Vec::new(),
+        rotate_proxies: false,
     }
 }
 
@@ -501,11 +502,12 @@ fn 设置的线上格式是小驼峰() {
         "soundEnabled",
         "openBagOnHit",
         "proxies",
+        "rotateProxies",
     ] {
         assert!(obj.contains_key(key), "缺少字段 {key}：{value}");
     }
     assert!(!obj.contains_key("interval_seconds"), "不该有蛇形字段");
-    assert_eq!(obj.len(), 8);
+    assert_eq!(obj.len(), 9);
 }
 
 #[test]
@@ -591,6 +593,10 @@ fn 代理地址只留合法的并去重() {
     )
     .expect("旧配置应当可读");
     assert!(old.proxies.is_empty());
+    assert!(
+        !old.rotate_proxies,
+        "旧配置没有换 IP 开关，读上来必须是关闭"
+    );
 }
 
 // ---------------------------------------------------------------------------
