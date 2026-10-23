@@ -112,6 +112,55 @@ class CartReuseTests(unittest.TestCase):
         self.service.browser.assert_not_called()
         self.assertEqual(self.service.browser.mock_calls, [])
 
+    def test_clearing_removes_only_other_items_then_reuses_the_target(self):
+        self.service.preferences['clear_bag_before_purchase']=True
+        target=dict(title='iPhone 18 Pro 256GB 冰川蓝色',quantity=1,remove_ref='target-row')
+        self.snapshot['items']=[target,dict(title='旧商品',quantity=1,remove_ref='old-row')]
+        self.service.clear_tick(self.snapshot,11)
+        self.assertEqual(self.service.dispatch.call_args.args[1].ref,'old-row')
+        self.assertIsNone(self.service.attempt)
+        # 移除还没生效（行数没变）：不复用，也不再点移除。
+        self.service.dispatch.reset_mock()
+        self.service.clear_tick(self.snapshot,12)
+        self.service.dispatch.assert_not_called()
+        self.assertIsNone(self.service.attempt)
+        # 只剩目标那一行：直接复用去结账。
+        self.service.clear_tick(dict(self.snapshot,items=[target]),13)
+        self.assertEqual(self.service.phase,'RUN')
+        self.assertTrue(self.service.attempt.add_submitted)
+        self.service.dispatch.assert_not_called()
+
+    def test_cleared_cart_still_starts_from_the_product_page(self):
+        self.service.preferences['clear_bag_before_purchase']=True
+        self.snapshot['items']=[dict(title='旧商品',quantity=1,remove_ref='old-row')]
+        self.service.clear_tick(self.snapshot,11)
+        self.assertEqual(self.service.dispatch.call_args.args[1].ref,'old-row')
+        self.service.start_product=Mock()
+        self.service.clear_tick(dict(stage='BAG',empty_bag=True,items=[]),13)
+        self.service.start_product.assert_called_once()
+
+    def test_target_with_trade_in_is_not_reused(self):
+        self.snapshot['items'][0].update(trade_in=True,remove_ref='target-row')
+        self.service.clear_tick(self.snapshot,11)
+        self.assertIsNone(self.service.attempt)
+        self.assertEqual(self.service.status['mode'],'attention')
+        self.service.dispatch.assert_not_called()
+        self.service.preferences['clear_bag_before_purchase']=True
+        self.service.status['mode']='running'
+        self.service.clear_tick(self.snapshot,12)
+        self.assertIsNone(self.service.attempt)
+        self.assertEqual(self.service.dispatch.call_args.args[1].ref,'target-row')
+
+    def test_bag_step_refuses_checkout_when_an_item_carries_trade_in(self):
+        self.service.clear_tick(self.snapshot,11)
+        snapshot=copy.deepcopy(self.snapshot)
+        snapshot['items'][0]['trade_in']=True
+        snapshot.update(total=9999,bag_applecare='none',
+                        controls=[dict(ref='checkout',label='结账',role='button')])
+        decision=self.service.attempt.decide(snapshot,12)
+        self.assertEqual(decision.kind,'attention')
+        self.assertIn('折抵换购',decision.reason)
+
     def test_multiple_cart_rows_are_removed_serially_then_start_target(self):
         self.service.preferences['clear_bag_before_purchase']=True
         self.snapshot['items']=[dict(title='旧商品',quantity=1,remove_ref='one'),

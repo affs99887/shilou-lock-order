@@ -107,7 +107,7 @@ def make_browser(owner):
 LOGIN_REMINDER_SECONDS = 5 * 60
 
 HANDOFFS = {
- 'login': ('Apple 需要登录', '请在 Safari 当前选购窗口完成 Apple 登录；登录后会自动接着结账，不用点继续。购物袋保留，未下单或付款。'),
+ 'login': ('Apple 需要登录', '请在 Safari 当前选购窗口完成 Apple 登录；登录页有「保持我的登录状态」就勾上，Safari 退出后也不用重新登录。登录后会自动接着结账，不用点继续。购物袋保留，未下单或付款。'),
  'privacy': ('请确认 Apple 隐私说明', '官网弹出了 Apple 和你的数据隐私，请本人阅读并自主决定是否同意；软件不会替你勾选。未下单或付款。'),
  'phone': ('请完成取货手机号验证', '请在 Safari 联系人页完成手机号验证，验证码由本人输入；核验通过后从当前页面继续，不重新加购。'),
  'captcha': ('请完成官网安全验证', '请回到 Safari 完成验证码或人机验证；保留购物袋，未下单或付款。'),
@@ -407,34 +407,44 @@ class Checkout(core.Service):
                 if now - self.phase_since > 30:
                     self.attention('购物袋更新超过 30 秒仍未完成；保留现场，不重复操作')
                 return
-        # Reuse only an exact single target row, before any remove was sent.
-        # The ordinary BAG state still verifies price, care, quantity and errors
-        # on its next fresh browser read before allowing checkout.
         items = snapshot.get('items', [])
-        if (snapshot.get('stage') == 'BAG' and self.pending_remove is None and
-                not snapshot.get('bag_busy') and not snapshot.get('errors') and
-                self.execution_preferences.get('trade_in', 'none') == 'none' and
-                len(items) == 1 and not self.owner.order_guard.blocked):
-            target = core.purchase_targets(self.execution_preferences)[self.index]
-            if (matches_target(items[0].get('title', ''), target) and
-                    type(items[0].get('quantity')) is int and
-                    items[0]['quantity'] == target['quantity']):
-                self.attempt = core.Attempt(self.execution_preferences, target, now)
-                self.attempt.target['pickup_dates'] = list(self.execution_preferences['pickup_dates'])
-                # A cart already exists. Never allow canonical-entry recovery
-                # to add another copy after this point.
-                self.attempt.add_submitted = True
-                self.phase = 'RUN'
-                self.phase_since = now
-                self.update(mode='running', stage='BAG',
-                            reason='购物袋已有相同型号、颜色、容量和数量；正在重新核对预算与保障，不重复加购',
-                            intervention=None)
-                self.last_handoff = None
-                self.event('bag_reused', '复用完全匹配的购物袋商品，下一次读取重新核对')
-                return
-        if snapshot.get('items') and not self.execution_preferences['clear_bag_before_purchase']:
+        on_bag = snapshot.get('stage') == 'BAG'
+        # 上一次移除已经生效（商品行数变少了），不再算「移除结果未确认」，
+        # 这样移掉多余商品后，剩下的目标商品可以直接拿来结账。
+        if on_bag and self.pending_remove and len(items) < self.pending_remove[0]:
+            self.pending_remove = None
+        target = core.purchase_targets(self.execution_preferences)[self.index]
+        # 购物袋里型号、颜色、容量、数量都和目标一致，且没带折抵换购的那一行。
+        exact = [i for i in items if matches_target(i.get('title', ''), target) and
+                 type(i.get('quantity')) is int and i['quantity'] == target['quantity'] and
+                 not i.get('trade_in')]
+        # 方案要折抵换购时不复用：折抵要在商品页由本人估价，购物袋里的旧商品不能代替。
+        settled = (on_bag and self.pending_remove is None and
+                   not snapshot.get('bag_busy') and not snapshot.get('errors') and
+                   self.execution_preferences.get('trade_in', 'none') == 'none')
+        # 购物袋里只有这一件目标商品：直接去结账，不管是否勾选了清空，都不移除再重新加购。
+        # 结账前，购物袋那一步仍会用新读到的页面核对预算、AppleCare+、数量和页面报错。
+        if settled and len(items) == 1 and len(exact) == 1:
+            self.attempt = core.Attempt(self.execution_preferences, target, now)
+            self.attempt.target['pickup_dates'] = list(self.execution_preferences['pickup_dates'])
+            # A cart already exists. Never allow canonical-entry recovery
+            # to add another copy after this point.
+            self.attempt.add_submitted = True
+            self.phase = 'RUN'
+            self.phase_since = now
+            self.update(mode='running', stage='BAG',
+                        reason='购物袋已是目标型号、颜色、容量和数量；核对预算与保障后直接结账，不重新加购',
+                        intervention=None)
+            self.last_handoff = None
+            self.event('bag_reused', '复用完全匹配的购物袋商品，下一次读取重新核对')
+            return
+        clear = self.execution_preferences['clear_bag_before_purchase']
+        if items and not clear:
             self.attention('购物袋已有商品；未获清空授权，保留现场')
             return
+        # 允许清空，且购物袋里除了目标商品还有别的：只移除别的，把目标排在最后留下。
+        if clear and settled and len(exact) == 1 and len(items) > 1:
+            snapshot = dict(snapshot, items=[i for i in items if i is not exact[0]] + exact)
         return super().clear_tick(snapshot, now)
 
 class Bridge:

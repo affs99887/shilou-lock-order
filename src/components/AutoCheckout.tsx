@@ -117,7 +117,7 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
         <Button size="sm" variant="ghost" className="action-login" disabled={locked || foreign} title="打开 Apple 账号页，在弹出的浏览器窗口登录；登录确认后自动结束，不加购" onClick={() => void command("login")}>{status?.loginTask ? "等待登录…" : "登录 Apple 账户"}</Button>
       </div>
     </div>
-    <p className="checkout-note" data-testid="checkout-session">账号登录：{status?.session || "开始选购时检查官网登录状态；仅在官网要求时由本人认证"}。选购窗口建议最小化保留，关闭后重新结账仍可能需要登录。</p>
+    <p className="checkout-note" data-testid="checkout-session">账号登录：{status?.session || "开始选购时检查官网登录状态；仅在官网要求时由本人认证"}。登录保存在 Safari 里，重开软件不会退出登录；Safari 完全退出后可能要重新登录，登录时勾选「保持我的登录状态」可以避免。</p>
     {(!plan || !localTargets.length || locked) && <p className="checkout-note" data-testid="checkout-disabled-reason">{pending ? "正在处理，请稍候…" : status?.stopping ? "正在停止，完成后可重新启用。" : needsAttention ? "当前选购已暂停，新库存不会另开订单。请按下方原因处理后继续；若官网窗口已关闭，请先停止选购，再重新启用。" : status?.busy ? "选购正在执行；如需重新启用，请先停止选购。" : status?.armed ? "自动选购已启用；修改方案或重新启用前，请先停止选购。" : !plan ? "选购组件尚未就绪；连接失败时请重启软件后重试。" : "请先在左侧添加至少一个监控目标（与选购地区一致）。"}</p>}
     <Dialog open={confirmation !== null} onOpenChange={value => { if (!value) setConfirmation(null); }}>
       <DialogContent>

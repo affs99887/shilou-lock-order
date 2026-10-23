@@ -255,7 +255,9 @@ function appleCheckout(request) {
     const q = e.querySelector('[data-autom="item-quantity-dropdown"]');
     const title = e.querySelector("h2,h3,[data-autom*=product-name]");
     const remove = e.querySelector('button[data-autom="bag-item-remove-button"]');
-    return {title: title ? title.textContent.trim() : "", quantity: q ? Number(q.value) : null,
+    // 这一行带了折抵换购抵扣（「折抵」字样加一笔减去的金额），只写着可以折抵的宣传语不算。
+    const tradeIn = /折抵/.test(visibleText(e)) && /[-−–]\s*(?:RMB|[¥￥])\s*[\d,]+/.test(visibleText(e));
+    return {title: title ? title.textContent.trim() : "", quantity: q ? Number(q.value) : null, trade_in: tradeIn,
       quantity_ref: q ? ref(q) : "", quantity_disabled: q ? disabled(q) : true,
       quantity_options: q ? [...q.options].filter(o=>!o.disabled&&!o.parentElement.disabled&&/^\d+$/.test(o.value)).map(o=>Number(o.value)).filter(n=>n>0) : [],
       remove_ref: remove ? ref(remove) : ""};
@@ -590,8 +592,15 @@ function appleCheckout(request) {
             const panelId=active[0].getAttribute("aria-controls");
             const panel=panelId ? document.getElementById(panelId) : root;
             const options=panel && visible(panel) ? [...panel.querySelectorAll('button,[role=button],[role=option]')].filter(e=>visible(e)&&!disabled(e)&&regionEqual(label(e),regionTarget[step],step)) : [];
+            // 这一层找不到目标时，先看上层：省份（非直辖市还有城市）和目标不一致，说明这一层列的是
+            // 别处的选项（比如官网默认定位到南京），点回上层重新选，而不是当作缺失交给本人。
+            const parentDiffers=k=>k!==step&&byKey(k).length===1&&!regionEqual(tabValue(byKey(k)[0]),regionTarget[k],k);
+            const upKey=step==='province'?'':parentDiffers('province')?'province':
+              (step==='district'&&!municipality&&parentDiffers('city'))?'city':'';
+            const upTab=upKey?byKey(upKey)[0]:null;
             if (options.length===1) regionPicker.next=regionAction(options[0],step,"click");
             else if (options.length>1) regionPicker.reason="ambiguous";
+            else if (upTab && !disabled(upTab)) regionPicker.next=regionAction(upTab,"tab_"+upKey,"click");
             else if(panel && !panel.querySelector('[aria-busy="true"],[role="progressbar"]') && [...panel.querySelectorAll('button,[role=button],[role=option]')].some(e=>visible(e)&&!disabled(e)&&!tabKey(e)))regionPicker.reason="missing";
             else if (step!=='province' && byKey('province').length===1 && !disabled(byKey('province')[0]))
               regionPicker.recovery=regionAction(byKey('province')[0],'tab_province','click');

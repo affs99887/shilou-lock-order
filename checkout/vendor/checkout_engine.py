@@ -709,6 +709,9 @@ class Attempt:
             wants_extras = self.preferences.get("accessories", "none") == "manual"
             if not phones or (extras and not wants_extras):
                 return self.finish("attention", "购物袋含其他商品或目标缺失；未自动删除")
+            # 购物袋里的商品可能是之前在官网手动加的，带着折抵换购；方案没选折抵就不能直接结账。
+            if self.preferences.get("trade_in", "none") == "none" and any(i.get("trade_in") for i in phones):
+                return self.finish("attention", "购物袋商品带有折抵换购，与方案不符；请在官网移除折抵后继续，未点击结账")
             wanted_quantity = self.target["quantity"]
             split_rows = len(phones) > 1
             if split_rows and not (wanted_quantity == 2 and len(phones) == 2 and
