@@ -231,15 +231,30 @@ test('manual start stays disabled while a checkout runs, is stopping, or for oth
 });
 test('advance login is one click, needs no plan save, and shows the account state', async () => {
  const a = ui();
- const session = () => a.nodes().find(n => n.props?.['data-testid'] === 'checkout-session').props.children.join('');
- assert.match(session(), /仅在官网要求时由本人认证/);
+ // 账号状态只显示第一句，完整说明在悬停提示里；没确认登录前，下方提示怎样免于反复登录。
+ const node = () => a.nodes().find(n => n.props?.['data-testid'] === 'checkout-session');
+ const session = () => node().props.children.at(-1);
+ const tip = () => a.nodes().find(n => n.props?.['data-testid'] === 'login-tip');
+ assert.equal(session(), '开始选购时检查官网登录状态');
+ assert.match(node().props.title, /仅在官网要求时由本人认证/);
+ assert.match(tip().props.children, /保持我的登录状态/);
  a.button('登录 Apple 账户').props.onClick(); await new Promise(setImmediate);
  assert.deepEqual(a.calls.map(x => x.op), ['login'], '只发 login，不保存方案、不启用选购');
  a.hooks[0] = { ...a.hooks[0], session: '账号页登录已确认；后续购买复用当前窗口，结账仍可能再次认证' };
- assert.match(session(), /账号页登录已确认/);
+ assert.equal(session(), '账号页登录已确认');
+ assert.match(node().props.title, /结账仍可能再次认证/);
+ assert.equal(tip(), undefined, '确认登录后不再占一行提示');
  a.hooks[0] = { ...a.hooks[0], busy: true, loginTask: true };
  const waiting = a.button('等待登录…');
  assert.equal(waiting.props.disabled, true, '登录进行中不能重复发起');
+});
+test('a reached review page shows a calm banner, other handoffs stay as warnings', () => {
+ const a = ui();
+ const banner = () => a.nodes().find(n => n.props?.['data-testid'] === 'checkout-intervention');
+ a.hooks[0].intervention = { kind: 'review', title: '已到订单核对页，请本人检查', body: '请在 Safari 核对' };
+ assert.match(banner().props.className, /is-done/);
+ a.hooks[0].intervention = { kind: 'login', title: 'Apple 需要登录', body: '请在 Safari 登录' };
+ assert.doesNotMatch(banner().props.className, /is-done/);
 });
 test('advance login stays disabled while checkout is armed or for other regions', () => {
  const armed = ui(); armed.hooks[0].armed = true;

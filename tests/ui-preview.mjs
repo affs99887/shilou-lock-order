@@ -50,6 +50,15 @@ assert.ok((await table.boundingBox()).height>=320,'inventory keeps its readable 
 assert.equal(await page.getByRole('navigation').count(),0);
 assert.equal(await page.getByLabel('总预算（含保障）',{exact:false}).isVisible(),false);
 for(const name of ['启用有货自动选购','手动开始选购','测试演练','登录 Apple 账户'])assert.equal(await page.getByRole('button',{name,exact:true}).isVisible(),true,name+' stays on the page while settings are closed');
+// 一屏布局：自动选购在最上面，日志一直展开并贴在窗口底部，页面本身不上下滚动。
+const checkoutBox=await page.getByRole('region',{name:'自动选购'}).boundingBox();
+const logs=page.getByRole('region',{name:'查询日志'});
+assert.ok(checkoutBox.y+checkoutBox.height<targetBox.y,'checkout strip sits above targets and inventory');
+assert.equal(await logs.isVisible(),true,'logs are open without a toggle');
+const logsBox=await logs.boundingBox(), viewport=page.viewportSize();
+assert.ok(logsBox.y>tableBox.y+tableBox.height-1,'logs sit below the inventory');
+assert.ok(viewport.height-(logsBox.y+logsBox.height)<=24,'logs sit at the bottom of the window');
+assert.equal(await page.evaluate(()=>document.documentElement.scrollHeight>innerHeight+1),false,'the page itself does not scroll vertically');
 await noOverflow();
 await screenshot(page,'light.png',{fullPage:true});
 await page.emulateMedia({colorScheme:'dark'});
@@ -114,10 +123,8 @@ assert.equal(await page.getByRole('button',{name:'停止选购',exact:true}).isV
 await page.evaluate(()=>window.__EMIT__('checkout://status',window.__CHECKOUT_STATUS__));
 
 await page.evaluate(()=>window.__EMIT__('watcher://notice','界面演示数据，不代表实际库存。'));
-await page.getByRole('button',{name:'查询日志',exact:true}).click();
-assert.equal(await page.getByRole('region',{name:'查询日志'}).isVisible(),true);
+assert.equal(await page.getByRole('button',{name:'查询日志',exact:true}).count(),0,'logs have no fold toggle');
 await page.getByText('界面演示数据，不代表实际库存。',{exact:false}).waitFor();
-await page.getByRole('button',{name:'查询日志',exact:true}).click();
 for(const colorScheme of ['light','dark']){
  await page.emulateMedia({colorScheme});
  await page.setViewportSize({width:1000,height:640});
@@ -130,5 +137,5 @@ await page.getByText('从一个心仪的型号开始').waitFor();
 assert.equal(await page.getByRole('button',{name:'开始监测',exact:true}).isEnabled(),false);
 await screenshot(page,'empty.png',{fullPage:true});
 assert.deepEqual(errors,[]);
-console.log('UI preview passed: one-page layout, both themes, 1280/1000 widths, target/Bark/contact/plan draft retention in modals, main actions and stop always on the page, confirmation cancel/accept. Mocked IPC only; external requests blocked.');
+console.log('UI preview passed: one-screen layout with checkout on top and logs docked at the bottom, both themes, 1280/1000 widths, target/Bark/contact/plan draft retention in modals, main actions and stop always on the page, confirmation cancel/accept. Mocked IPC only; external requests blocked.');
 }finally{await browser.close();server.close();}

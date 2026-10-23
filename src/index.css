@@ -120,23 +120,25 @@
 
 [hidden] { display: none !important; }
 
-/* 监控在同一个页面完成；手机提醒和选购方案在弹窗里设置。 */
-.app-shell { max-width: 1680px; margin-inline: auto; padding-inline: 30px; }
-.app-toolbar { min-height: 78px; display: flex; justify-content: space-between; align-items: center; gap: 24px; border-bottom: 1px solid var(--border); }
+/* 首页一屏放下：顶栏、自动选购、添加监控和库存、查询日志。窗口够大时整页不滚动，
+   添加监控、库存表和日志各自在框内滚动；窗口太小时退回整页滚动，免得库存表被挤没。 */
+.app-shell { display: flex; flex-direction: column; max-width: 1680px; margin-inline: auto; padding-inline: 28px; }
+@media (min-width: 801px) and (min-height: 760px) { .app-shell { height: 100vh; } }
+.app-toolbar { min-height: 64px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px 24px; border-bottom: 1px solid var(--border); }
 .brand { display: flex; gap: 12px; align-items: center; flex-shrink: 0; }
-.brand-symbol { display: grid; place-items: center; background: #0066cc; color: white; width: 42px; height: 42px; border-radius: 13px; box-shadow: 0 4px 12px #0066cc22; }
-.brand h1 { font-size: 19px; line-height: 1.3; font-weight: 650; letter-spacing: -.6px; }
-.brand p { font-size: 11px; margin-top: 4px; color: var(--muted-foreground); }
-.toolbar-actions { display: flex; align-items: center; gap: 12px; }
-.toolbar-run-state { margin-right: 8px; padding-right: 22px; border-right: 1px solid var(--border); }
+.brand-symbol { display: grid; place-items: center; background: #0066cc; color: white; width: 38px; height: 38px; border-radius: 12px; box-shadow: 0 4px 12px #0066cc22; }
+.brand h1 { font-size: 17px; line-height: 1.25; font-weight: 650; letter-spacing: -.4px; }
+.brand p { font-size: 11px; margin-top: 2px; color: var(--muted-foreground); }
+.toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px 14px; }
+.toolbar-run-state { padding-right: 14px; border-right: 1px solid var(--border); }
 .toolbar-run-state > span { font-size: 12px; }
-.monitor-toggle { min-width: 120px; height: 38px; }
-.app-main { min-width: 0; padding-block: 18px 12px; display: flex; flex-direction: column; gap: 20px; }
-.monitor-workspace { display: grid; grid-template-columns: 282px minmax(0, 1fr); align-items: start; gap: 22px; }
-.monitor-content { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.eyebrow { display: block; font-size: 9px; font-weight: 600; letter-spacing: 1.5px; color: var(--muted-foreground); margin-bottom: 5px; }
+.toolbar-note { font-size: 12px; color: var(--muted-foreground); }
+.toolbar-community { padding-right: 14px; border-right: 1px solid var(--border); }
+.monitor-toggle { min-width: 112px; height: 36px; }
+.app-main { flex: 1; min-height: 0; min-width: 0; padding-block: 16px; display: flex; flex-direction: column; gap: 14px; }
+.monitor-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 282px minmax(0, 1fr); align-items: stretch; gap: 14px; }
 
-.target-panel { min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: 16px; background: var(--card); box-shadow: 0 3px 16px #00000003; }
+.target-panel { min-width: 0; min-height: 0; overflow-y: auto; padding: 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); box-shadow: 0 3px 16px #00000003; }
 .target-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 18px; }
 .target-heading h2 { font-size: 16px; font-weight: 650; letter-spacing: -.3px; }
 .target-heading p { font-size: 11px; color: var(--muted-foreground); margin-top: 5px; }
@@ -157,14 +159,17 @@
 .target-tip p { font-size: 11px; color: var(--foreground); }
 .target-tip span { display: block; color: var(--muted-foreground); font-size: 10px; line-height: 1.6; margin-top: 4px; }
 
-.inventory-page { min-width: 0; background: var(--card); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; box-shadow: 0 3px 16px #00000003; }
-.inventory-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 18px 20px; }
-.inventory-heading h2 { display: flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 650; letter-spacing: -.4px; }
+.inventory-page { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; box-shadow: 0 3px 16px #00000003; }
+.inventory-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; padding: 14px 18px; }
+.inventory-heading h2 { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 650; letter-spacing: -.3px; }
+.inventory-note { align-self: center; font-size: 11px; color: var(--muted-foreground); }
 .target-count { background: var(--muted); color: var(--muted-foreground); font-size: 11px; line-height: 21px; padding-inline: 7px; border-radius: 6px; letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .inventory-stats { display: flex; flex-wrap: wrap; gap: 14px; }
 .inventory-stats > span { background: transparent; border: none; padding: 0; box-shadow: none; }
 .inventory-stats > span > span:last-child { font-size: 15px; }
-.inventory-table { height: clamp(21.5rem, calc(100dvh - 31rem), 36rem); overflow: hidden; border-top: 1px solid var(--border); }
+.inventory-table { flex: 1; min-height: 320px; overflow: hidden; border-top: 1px solid var(--border); }
+/* 一屏布局里库存表跟着窗口伸缩，只保留一个能看清几行的最小高度。 */
+@media (min-width: 801px) and (min-height: 760px) { .inventory-table { min-height: 240px; } }
 .inventory-table thead { background: var(--muted); }
 .inventory-table th { height: 37px; font-weight: 500; }
 .inventory-table td { padding-block: 8px; font-size: 12px; }
@@ -178,34 +183,41 @@
 .inventory-empty > svg { color: var(--link); background: var(--link-muted); width: 62px; height: 62px; padding: 15px; border-radius: 20px; }
 .inventory-empty strong { font-size: 15px; color: var(--foreground); font-weight: 550; }
 .inventory-empty p { font-size: 12px; white-space: normal; }
-.inventory-footer { display: flex; align-items: center; gap: 16px; padding: 12px 18px; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 10px; }
-.log-toggle { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 11px; }
-.log-toggle:hover { color: var(--link); }
-.query-logs { height: 180px; border-top: 1px solid var(--border); overflow: hidden; background: var(--background); }
+/* 查询日志一直展开，固定在页面最底部；窗口较矮时让出一些高度给库存表。 */
+.query-logs { flex: none; height: 168px; display: flex; flex-direction: column; overflow: hidden; background: var(--card); border: 1px solid var(--border); border-radius: 14px; }
+.logs-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 18px; border-bottom: 1px solid var(--border); }
+.logs-heading h2 { font-size: 13px; font-weight: 600; }
+.logs-heading span { font-size: 11px; color: var(--muted-foreground); }
+.logs-body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 18px 10px; font-size: 12px; line-height: 1.75; }
+@media (max-height: 820px) { .query-logs { height: 132px; } .app-main { gap: 12px; padding-block: 12px; } }
 
 .checkout-panel { box-shadow: 0 3px 16px #00000003; border-color: var(--border); }
-.compact-checkout { padding: 16px 20px; border-radius: 14px; }
-.checkout-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.checkout-heading h2 { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
-.checkout-heading h2 > svg { color: var(--link); }
-.panel-toggle { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--link); padding: 5px 0 5px 8px; }
-.checkout-status-grid { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 12px; }
-.checkout-status-grid > div { display: flex; align-items: baseline; gap: 7px; }
-.checkout-status-grid span { font-size: 11px; color: var(--muted-foreground); }
-.checkout-status-grid strong { font-size: 12px; font-weight: 500; }
+/* 自动选购放在顶栏下面：第一行是状态，第二行是选购目标和按钮，需要本人处理时提示条插在两行之间。 */
+.compact-checkout { flex: none; padding: 14px 20px; border-radius: 14px; }
+.checkout-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; font-size: 12px; }
+.checkout-facts h2 { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
+.checkout-facts h2 > svg { color: var(--link); }
+.checkout-facts > div > span:first-child { margin-right: 6px; color: var(--muted-foreground); }
+.checkout-facts strong { font-weight: 500; }
 /* 自动选购状态前的圆点：灰＝未启用，蓝＝已启用或执行中，琥珀＝需要本人处理，绿＝已到核对页或待支付。 */
-.checkout-status-grid [data-tone] strong { display: inline-flex; align-items: center; gap: 6px; }
-.checkout-status-grid [data-tone] strong::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted-foreground); opacity: .55; }
-.checkout-status-grid [data-tone="armed"] strong::before, .checkout-status-grid [data-tone="busy"] strong::before { background: var(--link); opacity: 1; }
-.checkout-status-grid [data-tone="attention"] strong::before { background: #d97706; opacity: 1; }
-.checkout-status-grid [data-tone="ready"] strong::before { background: var(--in-stock); opacity: 1; }
-.checkout-rule { margin-top: 8px; font-size: 11px; color: var(--muted-foreground); }
-.checkout-rule strong { font-weight: 500; color: var(--foreground); }
-.checkout-main { display: grid; gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
-.checkout-target { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 12px; color: var(--muted-foreground); }
-.checkout-target select { min-width: 0; width: min(420px, 100%); height: 34px; padding-inline: 10px; font-size: 13px; border-color: var(--input); border-radius: 8px; }
+.checkout-facts [data-tone] strong { display: inline-flex; align-items: center; gap: 6px; }
+.checkout-facts [data-tone] strong::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted-foreground); opacity: .55; }
+.checkout-facts [data-tone="armed"] strong::before, .checkout-facts [data-tone="busy"] strong::before { background: var(--link); opacity: 1; }
+.checkout-facts [data-tone="attention"] strong::before { background: #d97706; opacity: 1; }
+.checkout-facts [data-tone="ready"] strong::before { background: var(--in-stock); opacity: 1; }
+.panel-toggle { margin-left: auto; display: flex; align-items: center; gap: 5px; padding: 4px 6px; border-radius: 7px; font-size: 12px; font-weight: 500; color: var(--link); }
+.panel-toggle:hover { background: var(--link-muted); }
+.checkout-banner { margin-top: 12px; padding: 10px 14px; border: 1px solid #f5c26b; border-radius: 10px; background: #fff7e6; color: #713f12; font-size: 12px; }
+.dark .checkout-banner { border-color: #92400e; background: rgb(120 53 15 / 32%); color: #fde68a; }
+.checkout-banner strong { font-size: 13px; }
+.checkout-banner p { margin-top: 2px; }
+.checkout-banner .checkout-banner-note { margin-top: 4px; font-size: 11px; opacity: .85; }
+.checkout-banner.is-done { border-color: color-mix(in srgb, var(--in-stock) 40%, transparent); background: color-mix(in srgb, var(--in-stock) 10%, var(--card)); color: var(--in-stock); }
+.checkout-main { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.checkout-target { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+.checkout-target select { min-width: 0; width: 340px; max-width: 100%; height: 34px; padding-inline: 10px; font-size: 13px; border-color: var(--input); border-radius: 8px; }
 /* 操作分三组：开始选购、选购过程、账号。组之间用细竖线隔开，主操作只有「启用有货自动选购」一个实心按钮。 */
-.checkout-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.checkout-actions { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
 .action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .action-group + .action-group { padding-left: 16px; border-left: 1px solid var(--border); }
 .checkout-actions .manual-start { background: var(--link-muted); color: var(--link); border-color: color-mix(in srgb, var(--link) 22%, transparent); }
@@ -242,14 +254,6 @@
 .submission-choice small { display: block; color: var(--muted-foreground); margin-top: 5px; }
 .settings-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: start; }
 .settings-grid > section { min-width: 0; padding: 22px; border-radius: 14px; }
-.monitor-workspace { align-items: stretch; }
-.monitor-sidebar > .target-panel { flex: 1; }
-.monitor-sidebar { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.monitor-content { display: flex; flex-direction: column; }
-.monitor-content > .inventory-page { flex: 1; display: flex; flex-direction: column; }
-.inventory-table { flex: none; min-height: 320px; }
-.app-footer { display: flex; align-items: center; gap: 10px; color: var(--muted-foreground); font-size: 10px; }
-.app-footer > span:first-child { font-weight: 600; padding-right: 10px; border-right: 1px solid var(--border); }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 button:focus-visible, select:focus-visible { outline: 3px solid #007aff88; outline-offset: 3px; }
@@ -258,14 +262,17 @@ button:focus-visible, select:focus-visible { outline: 3px solid #007aff88; outli
   .monitor-workspace { grid-template-columns: 260px minmax(0, 1fr); gap: 18px; }
   .target-panel { padding: 16px; }
   .inventory-stats { gap: 10px; }
-  .toolbar-run-state { margin-right: 0; padding-right: 16px; }
+  /* 这个宽度下按钮组会换行，去掉组间竖线，免得新的一行以一条竖线开头。 */
+  .action-group + .action-group { padding-left: 0; border-left: 0; }
 }
 @media (max-width: 800px) {
   .app-shell { padding-inline: 16px; }
   .app-toolbar { padding-block: 16px; flex-wrap: wrap; gap: 16px; }
   .toolbar-actions { flex: 1; justify-content: flex-end; }
   .toolbar-run-state { display: none; }
+  .toolbar-community { border-right: 0; padding-right: 0; }
   .monitor-workspace { grid-template-columns: minmax(0, 1fr); }
+  .inventory-table { flex: none; height: 420px; }
   .target-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .store-field { margin: 0; border: 0; padding: 0; }
   .target-actions { max-width: 320px; }
@@ -282,7 +289,6 @@ button:focus-visible, select:focus-visible { outline: 3px solid #007aff88; outli
   .toolbar-actions { justify-content: space-between; }
   .brand { width: 100%; }
   .inventory-heading { padding: 16px; }
-  .inventory-footer { flex-wrap: wrap; }
-  .checkout-heading { align-items: flex-start; }
+  .panel-toggle { margin-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

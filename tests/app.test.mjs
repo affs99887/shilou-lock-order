@@ -177,14 +177,16 @@ test("budget pacing is identified separately from query failures", () => {
   app.state.running = true;
   app.state.pacing = { paced: true, nextCheckInSecs: 137 };
   assert.equal(app.all(e => e.type === "span" && e.props.children === "查询预算等待").length, 1);
-  const children = app.all(e => e.props?.children !== undefined)
-    .flatMap(e => [e.props.children].flat()).filter(v => typeof v === "string" || typeof v === "number");
-  assert.ok(!children.includes(137));
-  assert.ok(!children.some(v => typeof v === "string" && /下一轮|扫描频率/.test(v)));
-  assert.equal(app.all(e => e.type === "TableHead" && e.props.children === "最后检查").length, 0);
+  // 倒计时由页面每秒换算：渲染时还没算出下一轮的时刻，先显示「正在查询」，不直接把等待秒数当倒计时。
+  const run = app.all(e => typeof e.type === "function" && e.type.name === "RunState")[0];
+  assert.equal(run.props.running, true);
+  assert.equal(run.props.detail, "正在查询");
+  app.state.running = false;
+  assert.equal(app.all(e => typeof e.type === "function" && e.type.name === "RunState")[0].props.detail, "");
+  assert.equal(app.all(e => e.type === "span" && e.props.children === "查询预算等待").length, 0);
 });
 
-test("inventory omits check times while query logs keep their timestamps and records", () => {
+test("inventory shows check times, the checkout strip sits on top and the log stays open at the bottom", () => {
   const app = renderApp();
   app.state.rows = [{
     target: { locale: "zh_CN", storeNumber: "R575", storeTitle: "Apple 武汉",
@@ -196,14 +198,21 @@ test("inventory omits check times while query logs keep their timestamps and rec
   assert.ok(layout.className.split(" ").includes("min-h-screen"));
   assert.ok(!layout.className.split(" ").includes("h-screen"));
   const table = app.control(e => e.props?.["aria-label"] === "监控型号与库存状态");
-  assert.ok(table.className.includes("shrink-0"));
-  assert.ok(!table.className.includes("min-h-0"));
-  assert.equal(app.all(e => e.type === "TableHead" && e.props.children === "最后检查").length, 0);
+  assert.ok(table.className.includes("inventory-table"));
+  assert.equal(app.all(e => e.type === "TableHead" && e.props.children === "最近检查").length, 1);
   assert.equal(app.all(e => e.type === "TableCell" && e.props.children === "演练型号 256GB 白色").length, 1);
-  assert.equal(app.all(e => e.type === "TableCell").length, 4);
-  assert.ok(app.control(e => e.props?.["aria-label"] === "查询日志").className.includes("shrink-0"));
+  assert.equal(app.all(e => e.type === "TableCell").length, 5);
+  assert.equal(app.all(e => e.type === "TableCell" && /^\d{2}:\d{2}:\d{2}$/.test(e.props.children)).length, 1);
+  // 日志一直展开：没有折叠按钮，也不会被隐藏。
+  const logs = app.control(e => e.props?.id === "query-logs");
+  assert.ok(logs.className.includes("shrink-0"));
+  assert.notEqual(logs.hidden, true);
+  assert.equal(app.all(e => e.props?.["aria-controls"] === "query-logs").length, 0);
   assert.equal(app.all(e => e.props?.line === "[12:30:00] 查询完成").length, 1);
-  assert.equal(app.all(e => e.type === "AutoCheckout").length, 1);
+  // 自动选购在添加监控和库存的上面，日志在它们下面。
+  const order = app.all(e => e.type === "AutoCheckout" || e.props?.["data-testid"] === "target-page" || e.props?.id === "query-logs")
+    .map(e => e.type === "AutoCheckout" ? "checkout" : e.props.id === "query-logs" ? "logs" : "targets");
+  assert.deepEqual(order, ["checkout", "targets", "logs"]);
 });
 
 test("secondary settings open in modals that keep drafts and keep targets beside inventory", () => {

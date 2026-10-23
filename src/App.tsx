@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   AlertTriangle,
-  ChevronDown,
-  ChevronUp,
+  Bell,
   Download,
   Pause,
   Play,
@@ -11,7 +10,6 @@ import {
   Trash2,
   X,
   Radar,
-  SlidersHorizontal,
   MapPin,
 } from "lucide-react";
 
@@ -65,12 +63,14 @@ import {
   type Category,
   describeAdvice,
   describeAvailability,
+  formatTime,
   isUntrusted,
   type Product,
   type StatusTone,
   type Target,
   targetKey,
 } from "@/lib/types";
+import { communityText, nextQueryText } from "@/lib/status-text";
 import { cn } from "@/lib/utils";
 
 /** 四种展示状态各自的样式。 */
@@ -101,10 +101,10 @@ function StatusBadge({ availability }: { availability: Availability }) {
   );
 }
 
-/** 运行状态。一个会呼吸的点比一行灰字更像「它还活着」。 */
-function RunState({ running }: { running: boolean }) {
+/** 运行状态。一个会呼吸的点比一行灰字更像「它还活着」；运行时后面跟一句下一轮什么时候查。 */
+function RunState({ running, detail }: { running: boolean; detail?: string }) {
   return (
-    <span className="text-muted-foreground flex items-center gap-2 text-sm">
+    <span className="text-muted-foreground flex items-center gap-2 text-sm" aria-live="off">
       <span className="relative flex size-2">
         {running && (
           <span className="bg-in-stock/60 absolute inline-flex size-full animate-ping rounded-full [animation-duration:2.4s]" />
@@ -116,7 +116,8 @@ function RunState({ running }: { running: boolean }) {
           )}
         />
       </span>
-      {running ? "监测运行中" : "监测已停止"}
+      {running ? <span className="text-foreground">监测运行中</span> : "监测已停止"}
+      {running && detail && <span>{detail}</span>}
     </span>
   );
 }
@@ -184,7 +185,25 @@ export default function App() {
   const [colors, setColors] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
-  const [logsOpen, setLogsOpen] = useState(false);
+  // 下一轮查询的时刻：每轮结束时按引擎报的等待秒数换算一次，之后每秒刷新显示的倒计时。
+  const [nextAt, setNextAt] = useState<number | null>(null);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    setNextAt(ui.running && ui.pacing ? Date.now() + ui.pacing.nextCheckInSecs * 1000 : null);
+  }, [ui.running, ui.pacing]);
+  useEffect(() => {
+    if (!ui.running) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [ui.running]);
+  const community = communityText(ui.community);
+  // 日志固定在底部、一直展开：新记录到来时滚到最下面；用户往上翻看旧记录时不打扰，翻回底部后再跟随。
+  const logBox = useRef<HTMLDivElement>(null);
+  const followLogs = useRef(true);
+  useEffect(() => {
+    const box = logBox.current;
+    if (box && followLogs.current) box.scrollTop = box.scrollHeight;
+  }, [ui.logs]);
   const storeOptions = useMemo(
     () => ui.stores.map((s) => ({ value: s.number, label: s.title })),
     [ui.stores],
@@ -301,11 +320,13 @@ export default function App() {
     <TooltipProvider delayDuration={200}>
       <div data-testid="watcher-layout" className="app-shell min-h-screen">
         <header className="app-toolbar">
-          <div className="brand"><span className="brand-symbol"><Radar size={23} /></span><div><h1>拾漏锁单</h1><p>Apple 门店库存监控</p></div></div>
+          <div className="brand"><span className="brand-symbol"><Radar size={21} /></span><div><h1>拾漏锁单</h1><p>Apple 门店库存监控，非 Apple 官方</p></div></div>
           <div className="toolbar-actions">
-            <div className="toolbar-run-state"><RunState running={ui.running} /></div>
+            <div className="toolbar-run-state"><RunState running={ui.running} detail={nextQueryText(ui.running, nextAt, now)} /></div>
+            {ui.running && ui.pacing?.paced && <span className="toolbar-note">查询预算等待</span>}
+            {community && <span className="toolbar-note toolbar-community" title={community.title}>{community.text}</span>}
             <Button variant="ghost" aria-haspopup="dialog" aria-expanded={settingsOpen} aria-controls="notification-settings" onClick={() => setSettingsOpen(!settingsOpen)}>
-              <SlidersHorizontal /> 手机提醒
+              <Bell /> 手机提醒
             </Button>
             {ui.running ? (
               <Button className="monitor-toggle" variant="secondary" onClick={() => void stopWatching()}>
@@ -374,8 +395,9 @@ export default function App() {
           </div>
         )}
 
+        <AutoCheckout targets={targets} expanded={planOpen} onSettings={() => setPlanOpen(!planOpen)} />
+
         <div className="monitor-workspace">
-          <div className="monitor-sidebar">
           <aside data-testid="target-page" className="target-panel" aria-label="添加监控目标">
             <div className="target-heading">
               <div><h2>添加监控</h2></div>
@@ -443,18 +465,17 @@ export default function App() {
               </p>
             </div>
           </aside>
-          </div>
-          <div className="monitor-content">
           <div data-testid="inventory-page" className="inventory-page">
             <div className="inventory-heading">
-              <div><span className="eyebrow">LIVE INVENTORY</span><h2>关注的库存 <span className="target-count">{ui.rows.length}</span></h2></div>
+              <h2>关注的库存 <span className="target-count">{ui.rows.length}</span></h2>
               <div className="inventory-stats">
                 <Stat label="有货" value={summary.inStock} tone="inStock" />
                 <Stat label="无货" value={summary.outOfStock} />
                 {summary.untrusted > 0 && <Stat label="查询异常" value={summary.untrusted} tone="unknown" />}
+                <span className="inventory-note">库存以 Apple 官网为准</span>
               </div>
             </div>
-        <section aria-label="监控型号与库存状态" className="inventory-table shrink-0">
+        <section aria-label="监控型号与库存状态" className="inventory-table">
           <ScrollArea className="h-full">
             <Table>
               <TableHeader>
@@ -462,13 +483,14 @@ export default function App() {
                   <TableHead className="text-muted-foreground w-24 pl-4 text-xs">状态</TableHead>
                   <TableHead className="text-muted-foreground text-xs">门店</TableHead>
                   <TableHead className="text-muted-foreground text-xs">型号</TableHead>
+                  <TableHead className="text-muted-foreground w-24 text-xs">最近检查</TableHead>
                   <TableHead className="w-32"><span className="sr-only">操作</span></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {ui.rows.length === 0 ? (
                   <TableRow className="hover:bg-transparent">
-                    <TableCell colSpan={4} className="text-muted-foreground h-28 text-center">
+                    <TableCell colSpan={5} className="text-muted-foreground h-28 text-center">
                       <div className="inventory-empty"><Radar size={34} /><strong>{ui.ready ? "从一个心仪的型号开始" : "正在载入…"}</strong><p>{ui.ready ? "在左侧选择型号与门店，添加后即可开始监控。" : "正在读取已保存的监控目标"}</p></div>
                     </TableCell>
                   </TableRow>
@@ -491,6 +513,7 @@ export default function App() {
                       <TableCell className="text-muted-foreground">
                         {row.target.productName}
                       </TableCell>
+                      <TableCell className="text-muted-foreground tabular-nums">{formatTime(row.lastCheckedMs)}</TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-2">
                         {row.availability.kind === "in_stock" && <Button size="sm"
@@ -514,6 +537,8 @@ export default function App() {
             </Table>
           </ScrollArea>
         </section>
+          </div>
+        </div>
 
         {purchase.error && <p role="alert" className="text-destructive">{purchase.error}</p>}
         <Dialog open={purchase.confirmationTarget !== null} onOpenChange={open => { if (!open) purchase.cancel(); }}>
@@ -529,28 +554,18 @@ export default function App() {
           </DialogContent>
         </Dialog>
 
-        <div className="inventory-footer">
-          <span>库存以 Apple 官网为准</span>
-          {ui.running && ui.pacing?.paced && <span>查询预算等待</span>}
-          <button type="button" className="log-toggle" aria-expanded={logsOpen} aria-controls="query-logs" onClick={() => setLogsOpen(!logsOpen)}>查询日志 {logsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
-        </div>
-        <section id="query-logs" aria-label="查询日志" hidden={!logsOpen} className="query-logs shrink-0">
-          <ScrollArea className="h-full">
-            <div className="p-4 font-mono text-xs leading-6 select-text">
-              {ui.logs.length === 0 ? <p className="text-muted-foreground">开始监控后，查询记录会显示在这里。</p> : ui.logs.map((line, i) => <LogLine key={i} line={line} />)}
-            </div>
-          </ScrollArea>
+        <section id="query-logs" aria-labelledby="query-logs-title" className="query-logs shrink-0">
+          <div className="logs-heading"><h2 id="query-logs-title">查询日志</h2><span>最新的在最下面，有货的行标绿</span></div>
+          <div ref={logBox} role="log" className="logs-body font-mono select-text"
+            onScroll={e => { const box = e.currentTarget; followLogs.current = box.scrollHeight - box.scrollTop - box.clientHeight < 24; }}>
+            {ui.logs.length === 0 ? <p className="text-muted-foreground">开始监控后，查询记录会显示在这里。</p> : ui.logs.map((line, i) => <LogLine key={i} line={line} />)}
+          </div>
         </section>
-          </div>
-          </div>
-        </div>
-        <AutoCheckout targets={targets} expanded={planOpen} onSettings={() => setPlanOpen(!planOpen)} />
         <ConfigModal id="notification-settings" narrow open={settingsOpen} title="手机提醒" description="保存后生效；关闭窗口会保留未保存的输入。" closeLabel="关闭手机提醒" onClose={() => setSettingsOpen(false)}>
           <div data-testid="settings-page" className="settings-grid">
             <BarkSettings saved={ui.settings.barkUrl || ""} />
           </div>
         </ConfigModal>
-        <footer className="app-footer"><span>拾漏锁单</span><span>独立选购工具 · 非 Apple 官方</span></footer>
         </main>
       </div>
     </TooltipProvider>

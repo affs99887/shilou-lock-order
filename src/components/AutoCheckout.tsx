@@ -91,17 +91,22 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
     : status?.busy ? "busy" : status?.armed ? "armed" : "idle";
   const togglePlan = () => onSettings ? onSettings() : setOpen(!open);
   const closePlan = () => { if (showPlan) togglePlan(); };
-  return <section className="checkout-panel compact-checkout shrink-0 rounded-xl border bg-card text-sm">
-    <div className="checkout-heading">
-      <h2><LockKeyhole size={16} /> 自动选购</h2>
+  // 账号状态只显示第一句，完整说明放进悬停提示，免得这一行太长。
+  const sessionText = status?.session || "开始选购时检查官网登录状态；仅在官网要求时由本人认证";
+  const session = (sessionText.split(/[；（(]/)[0] ?? "").trim() || sessionText;
+  // 确认登录前一直提示怎样免于反复登录；确认后就不占这一行了。
+  const loginConfirmed = /登录已确认/.test(status?.session || "");
+  return <section className="checkout-panel compact-checkout shrink-0 rounded-xl border bg-card text-sm" aria-labelledby="checkout-title">
+    <div className="checkout-facts">
+      <h2 id="checkout-title"><LockKeyhole size={16} /> 自动选购</h2>
+      <div data-testid="checkout-execution-status" data-tone={tone}><span className="sr-only">状态</span><strong>{status?.stopping ? "停止中" : status?.activationPending ? "正在校验资料" : needsAttention ? "已暂停，需要处理" : status?.mode === "awaiting_payment" ? "订单待支付" : status?.mode === "submitting" ? "正在核对下单结果" : status?.mode === "ready" ? "已到订单核对页" : status?.busy ? (status.manualRun ? "手动选购执行中" : "正在执行") : status?.armed ? "已启用，等待命中" : "未启用"}</strong></div>
+      <div data-testid="submission-status"><span>下单权限</span><strong>{status?.submissionEnabled ? "已授权自动下单" : "停在提交前"}</strong></div>
+      <div><span>付款</span><strong>{!plan ? "读取中…" : plan.financing === "official" ? `${plan.installment_option || "未选渠道"} ${plan.installment_months || "—"} 期` : plan.financing === "manual" ? "官网手动选择" : `${plan.payment} 全款`}</strong></div>
+      {plan && <div data-testid="pickup-rule-summary"><span>取货</span>{pickupSummary}</div>}
+      <div data-testid="checkout-session" title={sessionText}><span>账号</span>{session}</div>
       <button type="button" className="panel-toggle" aria-haspopup="dialog" aria-expanded={showPlan} aria-controls="purchase-plan" onClick={togglePlan}><Settings2 size={15} /> 方案设置</button>
     </div>
-    <div className="checkout-status-grid">
-      <div data-testid="checkout-execution-status" data-tone={tone}><span>自动选购</span><strong>{status?.stopping ? "停止中" : status?.activationPending ? "正在校验资料" : needsAttention ? "已暂停，需要处理" : status?.mode === "awaiting_payment" ? "订单待支付" : status?.mode === "submitting" ? "正在核对下单结果" : status?.mode === "ready" ? "已到订单核对页" : status?.busy ? (status.manualRun ? "手动选购执行中" : "正在执行") : status?.armed ? "已启用，等待命中" : "未启用"}</strong></div>
-      <div data-testid="submission-status"><span>实际下单权限</span><strong>{status?.submissionEnabled ? "已授权自动下单" : "停在提交前"}</strong></div>
-      <div><span>付款方案</span><strong>{!plan ? "读取中…" : plan.financing === "official" ? `${plan.installment_option || "未选渠道"} · ${plan.installment_months || "—"} 期` : plan.financing === "manual" ? "官网手动选择" : `${plan.payment} · 全款`}</strong></div>
-    </div>
-    {plan && <p className="checkout-rule" data-testid="pickup-rule-summary"><strong>取货规则：</strong>{pickupSummary}</p>}
+    {status?.intervention && <div className={`checkout-banner${status.intervention.kind === "review" ? " is-done" : ""}`} role="alert" aria-live="assertive" data-testid="checkout-intervention"><strong>{status.intervention.title}</strong><p>{status.intervention.body}</p><p className="checkout-banner-note">软件同时向已配置的 Bark 发送提醒；若未收到，请检查手机提醒设置。请在 Apple 官网本人处理，提醒不代表已付款或已锁单。</p></div>}
     <div className="checkout-main">
       <label className="checkout-target">选购目标<select aria-label="选购目标" className="rounded border bg-background text-foreground" value={selected} onChange={e => setSelected(e.target.value)}><option value="">本地区列表第一项</option>{localTargets.map(t => <option key={targetKey(t)} value={targetKey(t)}>{t.storeTitle} · {t.productName}</option>)}</select></label>
       <div className="checkout-actions">
@@ -117,7 +122,8 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
         <Button size="sm" variant="ghost" className="action-login" disabled={locked || foreign} title="打开 Apple 账号页，在弹出的浏览器窗口登录；登录确认后自动结束，不加购" onClick={() => void command("login")}>{status?.loginTask ? "等待登录…" : "登录 Apple 账户"}</Button>
       </div>
     </div>
-    <p className="checkout-note" data-testid="checkout-session">账号登录：{status?.session || "开始选购时检查官网登录状态；仅在官网要求时由本人认证"}。登录保存在 Safari 里，重开软件不会退出登录；Safari 完全退出后可能要重新登录，登录时勾选「保持我的登录状态」可以避免。</p>
+    <p className="checkout-note" hidden={!status?.busy && !status?.armed && !status?.stopping && !!status && !status.error} role="status">{status?.stopping ? "正在停止，等待当前操作返回…" : `${status?.armed && !status.busy ? "已启用 · " : ""}${status?.reason || "正在连接选购组件…"}`}{status?.elapsed ? ` · ${status.elapsed.toFixed(1)} 秒` : ""}</p>
+    {!loginConfirmed && <p className="checkout-note" data-testid="login-tip">登录保存在 Safari 里，重开软件不会退出登录；Safari 完全退出后可能要重新登录，登录时勾选「保持我的登录状态」可以避免。</p>}
     {(!plan || !localTargets.length || locked) && <p className="checkout-note" data-testid="checkout-disabled-reason">{pending ? "正在处理，请稍候…" : status?.stopping ? "正在停止，完成后可重新启用。" : needsAttention ? "当前选购已暂停，新库存不会另开订单。请按下方原因处理后继续；若官网窗口已关闭，请先停止选购，再重新启用。" : status?.busy ? "选购正在执行；如需重新启用，请先停止选购。" : status?.armed ? "自动选购已启用；修改方案或重新启用前，请先停止选购。" : !plan ? "选购组件尚未就绪；连接失败时请重启软件后重试。" : "请先在左侧添加至少一个监控目标（与选购地区一致）。"}</p>}
     <Dialog open={confirmation !== null} onOpenChange={value => { if (!value) setConfirmation(null); }}>
       <DialogContent>
@@ -131,8 +137,6 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
         </DialogFooter>
       </DialogContent>
     </Dialog>
-    {status?.intervention && <div className="mt-3 rounded-xl border border-amber-400 bg-amber-50 p-4 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" role="alert" aria-live="assertive" data-testid="checkout-intervention"><strong>{status.intervention.title}</strong><p className="mt-1">{status.intervention.body}</p><p className="mt-2 text-xs">软件同时向已配置的 Bark 发送提醒；若未收到，请检查手机提醒设置。请在 Apple 官网本人处理，提醒不代表已付款或已锁单。</p></div>}
-    <p className="checkout-note" hidden={!status?.busy && !status?.armed && !status?.stopping && !!status && !status.error} role="status">{status?.stopping ? "正在停止，等待当前操作返回…" : `${status?.armed && !status.busy ? "已启用 · " : ""}${status?.reason || "正在连接选购组件…"}`}{status?.elapsed ? ` · ${status.elapsed.toFixed(1)} 秒` : ""}</p>
     {(error || status?.error) && <p className="mt-1 text-destructive" role="alert">{error || status?.error}</p>}
     {status?.profileRequired && <div className="mt-2 rounded border border-amber-500 p-3" role="alert"><strong>请先填写并保存联系与收货资料。</strong><Button variant="outline" size="sm" disabled={locked} onClick={() => !(expanded ?? open) && onSettings ? onSettings() : setOpen(true)}>填写收货资料</Button></div>}
     {status?.orderNeedsReview && <div className="mt-2 rounded border border-amber-500 p-2">已有下单记录。先在 Apple 核对订单，停止选购后才能清除此保护。<Button variant="outline" size="sm" disabled={locked} onClick={() => void command("acknowledge_order")}>已核对订单，允许新选购</Button></div>}
