@@ -44,6 +44,10 @@ function appleCheckout(request) {
   const ntext = norm(text);
   if (document.readyState === "loading" && ntext.length < 100) return {stage:"LOADING"};
   const path = location.pathname.toLowerCase();
+  // Initial HTML may contain enabled native form controls before the product
+  // application has finished loading. A recognizable page is not yet ready.
+  if (/\/shop\/buy-iphone\//.test(path) && document.readyState !== "complete")
+    return request.command ? {stage:"LOADING",result:"stale",reason:"product_updating"} : {stage:"LOADING"};
   const finalPattern = /立即下单|现在下单|提交订单|确认订单|立即付款|现在付款|确认付款|placeorder|paynow|立即购买|购买并支付/;
   const forbidden = e => finalPattern.test(norm(label(e))) || /同意.*条款|接受.*协议|签署|授权.*(?:征信|授信)|开通.*(?:花呗|白条)|申请.*(?:贷款|授信)/.test(norm(label(e)));
   function label(e) {
@@ -160,6 +164,14 @@ function appleCheckout(request) {
       const modelChoice = role === "radio" && !/applecare|折抵|换购/i.test(raw) && raw.match(/^iPhone\s*18\s*Pro(?:\s*Max)?(?=\s|[\d（(]|$)/i);
       if (modelChoice) {canonical = /max/i.test(modelChoice[0]) ? "iPhone 18 Pro Max" : "iPhone 18 Pro"; group = "model";}
       if (role === "button" && /^编辑邮编或城市、区县/.test(norm(raw))) group = "pickup_region_edit";
+      // Fresh checkout sessions have no committed location. Apple's button
+      // says "选择地区" but may expose aria-label="false". Bind to the official
+      // pickup control identity, not its incidental accessibility label.
+      if (role === "button" && /\/shop\/checkout(?:\/|$)/.test(path) &&
+          e.getAttribute("data-autom")==="fulfillment-pickup-store-search-button" &&
+          e.hasAttribute("aria-expanded") &&
+          /选择地区|编辑邮编或城市、区县/.test(norm(e.innerText || e.textContent || "") + norm(raw)))
+        group = "pickup_region_edit";
       // Apple's partially reset location picker can expose the accessible name
       // "false". Restrict recovery to the checkout location section, not a
       // generic unnamed button elsewhere on the page.
@@ -189,7 +201,7 @@ function appleCheckout(request) {
       const storeMatches = group === "store" && (storeIds.length && target.store_id ? storeIds.includes(target.store_id) : !!wantedStore && storeLabel === wantedStore);
       // 门店选项自带的编号（如 R683），只有唯一一个时才给出；手动开始换门店时靠它认店。
       const storeId = group === "store" && new Set(storeIds).size === 1 ? storeIds[0] : "";
-      return {ref: ref(e), label: canonical, role, group, store_matches:storeMatches, store_id:storeId, provider, installment, installment_months:installmentMonths, invoice_company:invoiceCompany, care_paid:carePaid, selected: selected(e), disabled: disabled(e)};
+      return {ref: ref(e), label: canonical, role, group, store_matches:storeMatches, store_id:storeId, store_id_matches:group === "store" && !!target.store_id && storeIds.includes(target.store_id), provider, installment, installment_months:installmentMonths, invoice_company:invoiceCompany, care_paid:carePaid, selected: selected(e), disabled: disabled(e)};
     });
   // A date may be a radio group while its check-in slot is a native SELECT.
   // Keep independent pickers separate: one selected item is not proof that
@@ -356,6 +368,29 @@ function appleCheckout(request) {
   const review = dedicatedReview || (stage === "REVIEW" && final &&
     /准备下单了吗.*请确保以下信息均准确无误/.test(headings) ? root : null);
   const reviewText = visibleText(review);
+  // Signed-in pickup may omit email on Contact. Keep verification pending
+  // until a visible, uniquely identified review contact section proves it.
+  let reviewContactEmailMatches = false, reviewContactEmail = null;
+  if (review && profile.email) {
+    const sections = [...review.querySelectorAll('.rs-review-contact,[data-autom="review-contact"]')].filter(visible);
+    const candidates = sections.map(visibleText);
+    const hs = [...review.querySelectorAll('h2')].filter(visible);
+    for (const h of hs.filter(e=>/^(联系信息|联系详情|取货详情|送货详情|电子邮件通知)$/.test(norm(e.textContent)))) {
+      const end=hs[hs.indexOf(h)+1], walker=document.createTreeWalker(review,NodeFilter.SHOW_TEXT), parts=[];
+      while(walker.nextNode()) {
+        const n=walker.currentNode;
+        if(visible(n.parentElement) && (h.compareDocumentPosition(n)&Node.DOCUMENT_POSITION_FOLLOWING) &&
+          (!end || (n.compareDocumentPosition(end)&Node.DOCUMENT_POSITION_FOLLOWING))) parts.push(n.textContent);
+      }
+      candidates.push(parts.join(' '));
+    }
+    const emails=[...new Set(candidates.flatMap(t=>t.match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)||[]).map(v=>v.toLowerCase()))];
+    reviewContactEmailMatches=emails.length===1 && emails[0]===String(profile.email).trim().toLowerCase();
+    // match：联系区里唯一的邮箱就是保存的邮箱；none：整个核对区都没显示任何邮箱；
+    // 其余（别的邮箱、多个邮箱、邮箱不在联系区）都算 mismatch。
+    reviewContactEmail = reviewContactEmailMatches ? "match" :
+      /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(reviewText) ? "mismatch" : "none";
+  }
   // Payment provider can be an image on Review, with no radio buttons.
   // Read only the payment section, never the whole-page marketing/FAQ copy.
   let reviewPayment = null;
@@ -725,6 +760,7 @@ function appleCheckout(request) {
       controls.some(c=>c.group === "store" && c.store_matches && c.disabled) ||
       (/你所在的地区无货可取/.test(ntext.slice(0,2500)) && fields.some(f=>f.key === "pickup_location" && f.matches)),
     store_selected: allStoresSelected,
+    store_id_verified: allStoresSelected && selectedStores.every(c=>c.store_id_matches),
     store_selection_conflict: selectedStores.some(c=>!c.store_matches),
     pickup_date_selected: scheduleSelected("pickup_date"),
     pickup_time_selected: scheduleSelected("pickup_time"),
@@ -739,6 +775,10 @@ function appleCheckout(request) {
       controls.filter(c => c.role === "button" && norm(c.label) === norm("继续填写取货详情") && !c.disabled).length === 1,
     final_button: !!final, final_order_ref: final && norm(final.label)==='立即下单' ? final.ref : null,
     review_payment: reviewPayment, installment_panel_stable: installmentStable,
+    contact_email_defer_allowed: stage==="CONTACT" && !!profile.email && /取货信息/.test(headings) &&
+      !fields.some(f=>f.key==="email") &&
+      ["family_name","given_name","phone","id_last4"].every(k=>fields.some(f=>f.key===k)),
+    review_contact_email_matches: reviewContactEmailMatches, review_contact_email: reviewContactEmail,
     review_full_payment: reviewFullPayment,
     order_pending_payment: pendingReceipt,
     review_target_matches: reviewItems.length>0&&reviewItems.every(x=>x.target_matches),
@@ -761,7 +801,7 @@ function appleCheckout(request) {
   if (stage === "BAG" && !items.length && !out.empty_bag) out.stage = "LOADING";
   // No field values in the fingerprint, only whether saved values were accepted.
   out.fingerprint = JSON.stringify([out.stage, controls.map(c => [c.label,c.selected,c.disabled]),
-    fields.map(f => [f.key,f.matches,f.filled,f.invalid,f.editable,f.required]),items,total,errors,out.bag_applecare,out.bag_care_actions,regionOpen,regionStep,regionPicker?{...regionPicker,manual_values:undefined,manual_token:undefined}:null,pickupSchedule,stockIssue,reviewItems,out.review_pickup_deferred,reviewEditRefs,extrasMatch,reviewPayment,reviewFullPayment]);
+    fields.map(f => [f.key,f.matches,f.filled,f.invalid,f.editable,f.required]),items,total,errors,out.bag_applecare,out.bag_care_actions,regionOpen,regionStep,regionPicker?{...regionPicker,manual_values:undefined,manual_token:undefined}:null,pickupSchedule,stockIssue,reviewItems,out.review_pickup_deferred,reviewEditRefs,extrasMatch,reviewPayment,reviewFullPayment,reviewContactEmailMatches,reviewContactEmail]);
   if (request.command) {
     if(target.manual_region_token)return {result:'refused',reason:'manual_region_read_only'};
     const c = request.command;

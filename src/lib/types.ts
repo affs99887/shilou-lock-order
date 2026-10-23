@@ -12,6 +12,7 @@
 
 export type UnknownReason =
   | { reason: "not_yet_checked" }
+  | { reason: "pickup_pending" }
   | { reason: "blocked"; detail: string }
   | { reason: "rate_limited" }
   | { reason: "schema_drift"; field: string; raw: string }
@@ -193,6 +194,13 @@ function describeUnknown(a: { kind: "unknown" } & UnknownReason): {
   switch (a.reason) {
     case "not_yet_checked":
       return { label: "待查询", tone: "pending", detail: "尚未轮到这一项" };
+    case "pickup_pending":
+      // Apple 正常回了数据，只是还没开放到店取货，不是故障，弱化显示即可。
+      return {
+        label: "未开放",
+        tone: "pending",
+        detail: "Apple 暂未开放这款在该店的到店取货（官网状态 default），开放后会自动显示有货或无货",
+      };
     case "blocked":
       return {
         label: "未知",
@@ -209,11 +217,7 @@ function describeUnknown(a: { kind: "unknown" } & UnknownReason): {
       return {
         label: "未知",
         tone: "unknown",
-        // 新品开售前 Apple 回的就是 default，不是接口变了；与 Rust 侧 is_pickup_not_open 一致。
-        detail:
-          a.field === "pickupDisplay" && a.raw === "default"
-            ? "Apple 暂未开放这款在该店的到店取货（官网状态 default），开放后会自动显示有货或无货"
-            : `接口返回结构与预期不符：${a.field} = ${a.raw}`,
+        detail: `接口返回结构与预期不符：${a.field} = ${a.raw}`,
       };
     case "apple_error":
       return { label: "未知", tone: "unknown", detail: `Apple 返回错误：${a.message}` };
@@ -224,9 +228,9 @@ function describeUnknown(a: { kind: "unknown" } & UnknownReason): {
   }
 }
 
-/** 这一行的数据是否已经不可信。 */
+/** 这一行的数据是否已经不可信。还没轮到、Apple 明说还没开放取货，都不算。 */
 export function isUntrusted(a: Availability): boolean {
-  return a.kind === "unknown" && a.reason !== "not_yet_checked";
+  return a.kind === "unknown" && a.reason !== "not_yet_checked" && a.reason !== "pickup_pending";
 }
 
 export function formatTime(ms: number | null): string {

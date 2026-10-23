@@ -46,11 +46,17 @@ def read(a, stores, fp, schedule=()):
         c['store_matches'] = c['store_id'] == a.target['store_id']
         controls.append(c)
     chosen = [c for c in controls if c['selected']]
+    selected = bool(chosen) and all(c['store_matches'] and not c['disabled'] for c in chosen)
     return dict(stage='FULFILLMENT', fingerprint=fp, controls=controls, fields=[], pickup_selected=True,
-                store_selected=bool(chosen) and all(c['store_matches'] and not c['disabled'] for c in chosen),
+                store_selected=selected, store_id_verified=selected,
                 store_selection_conflict=any(not c['store_matches'] for c in chosen),
                 pickup_unavailable=any(c['store_matches'] and c['disabled'] for c in controls),
                 pickup_schedule=list(schedule))
+
+
+# 门店已选中后，地区栏可能还显示「未匹配、加载中」，并给出重新打开地区搜索的按钮。
+SEARCH_AGAIN = dict(context='pickup', kind='tabs', open=False, matched=False, configured=True,
+                    reason='loading', next=dict(ref='search', key='region_pickup_open'))
 
 
 class ManualStoreChoiceTests(unittest.TestCase):
@@ -122,6 +128,29 @@ class ManualStoreChoiceTests(unittest.TestCase):
         self.assertEqual(a.decide(s, 3).kind, 'wait')
         self.assertEqual(a.decide(read(a, [store(BASE), store(SAME_CITY)], 'b'), 7).reason, 'store:' + BASE)
         self.assertEqual(a.decide(read(a, [store(BASE), store(SAME_CITY)], 'c'), 13).kind, 'attention')
+
+    def test_switched_store_confirmed_by_its_number_never_reopens_region_search(self):
+        # 换到同城另一家后，地区栏还按原门店的地区；门店编号对上就不再回头改地区，免得官网清掉取货时段。
+        a = attempt()
+        stores = [store(BASE, disabled=True), store(SAME_CITY)]
+        self.assertEqual(a.decide(read(a, stores, 'a'), 1).reason, 'store:' + SAME_CITY)
+        stores[1] = store(SAME_CITY, selected=True)
+        s = dict(read(a, stores, 'b', [dates('2026-10-23')]), region_picker=SEARCH_AGAIN)
+        d = a.decide(s, 2)
+        self.assertEqual((d.kind, d.value), ('set', '2026-10-23'))
+
+    def test_fixed_store_confirmed_by_its_number_never_reopens_region_search(self):
+        a = attempt('fixed')
+        s = dict(read(a, [store(BASE, selected=True)], 'a', [dates('2026-10-23')]), region_picker=SEARCH_AGAIN)
+        self.assertEqual(a.decide(s, 1).value, '2026-10-23')
+
+    def test_region_search_still_reopens_without_a_confirmed_store_number(self):
+        for choice in ('fixed', 'same_city'):
+            with self.subTest(choice=choice):
+                a = attempt(choice)
+                s = dict(read(a, [store(BASE, selected=True)], 'a', [dates('2026-10-23')]),
+                         region_picker=SEARCH_AGAIN, store_id_verified=False)
+                self.assertEqual(a.decide(s, 0).key, 'region_pickup_open')
 
     def test_continue_reconsiders_stores_that_were_excluded(self):
         p = plan('same_city')

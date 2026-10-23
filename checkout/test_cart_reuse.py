@@ -223,6 +223,10 @@ class CartReuseTests(unittest.TestCase):
         self.service.dispatch.assert_not_called()
 
     def test_missing_page_and_expired_session_have_distinct_notifications(self):
+        # 能自动重开时，找不到页面先不通知；重开次数用完或不能重开时才通知本人。
+        self.service.observe_diagnostics(dict(stage='NOT_FOUND', diagnostics={}))
+        self.assertIsNone(self.bridge.notice)
+        self.service.browser = Mock(spec=['call', 'navigate', 'open'])
         for stage, kind in [('NOT_FOUND', 'not_found'), ('SESSION_EXPIRED', 'expired')]:
             self.service.observe_diagnostics(dict(stage=stage, diagnostics={}))
             self.assertEqual(self.bridge.notice['kind'], kind)

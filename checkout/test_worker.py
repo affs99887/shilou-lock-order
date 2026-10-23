@@ -273,6 +273,7 @@ class FakeCheckout:
     def tick(self):
         self.active=False
         self.status['mode']='ready' if self.outcome=='ready' else 'attention'
+        if self.outcome=='review':self.status['stage']='REVIEW'  # 停在核对页等本人处理
         self.owner.retryable_end=self.outcome=='sold_out'
         self.owner.end_reason=self.reason if self.outcome=='sold_out' else ''
         self.owner.closed=True
@@ -467,6 +468,40 @@ class ManualStartTests(unittest.TestCase):
             self.assertFalse(s['busy'])
             self.assertFalse(s['armed'], '本人可能已在官网手动下单，不能再自动买一台')
             self.assertIn('走到过订单核对页', s['lastResult'])
+
+    @patch('worker.core.normalized_profile', return_value={})
+    @patch.object(Bridge, 'acquire')
+    def test_a_run_stopped_on_the_review_page_never_resumes_auto_checkout(self, *_):
+        # 停在核对页等本人处理（比如邮箱对不上）时，本人可能直接在那一页下了单。
+        for op in ('manual', 'rehearse'):
+            with self.subTest(op=op), tempfile.TemporaryDirectory() as d:
+                b = Bridge(FakeCheckout, data=Path(d))
+                b.service.outcome = 'review'
+                b.armed = True
+                b.request({'op': op, 'hit': unchecked_hit()})
+                b.run()
+                self.assertTrue(b.status()['busy'])
+                b.request({'op': 'end_run'})
+                one_pass(b)
+                s = b.status()
+                self.assertFalse(s['busy'])
+                self.assertFalse(s['armed'], '不能再自动买一台')
+                self.assertIn('走到过订单核对页', s['lastResult'])
+
+    @patch('worker.core.normalized_profile', return_value={})
+    @patch('worker.time.time', return_value=100)
+    @patch.object(Bridge, 'acquire')
+    def test_manual_run_whose_page_stays_missing_ends_by_itself(self, *_):
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(FakeCheckout, data=Path(d))
+            b.service.reason = '官网页面重开 2 次后仍打不开'
+            b.armed = True
+            b.request({'op': 'manual', 'hit': unchecked_hit()})
+            b.run()
+            s = b.status()
+            self.assertFalse(s['busy'])
+            self.assertTrue(s['armed'])
+            self.assertEqual(s['lastResult'], '手动选购没买到：官网页面重开 2 次后仍打不开。自动选购已恢复，有货后自动选购')
 
     @patch('worker.core.normalized_profile', return_value={})
     @patch.object(Bridge, 'acquire')

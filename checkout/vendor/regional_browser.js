@@ -5,8 +5,9 @@ function regionalCheckout(request) {
   'use strict';
   const bases={zh_HK:'/hk-zh',zh_TW:'/tw',ja_JP:'/jp',en_SG:'/sg',en_AU:'/au',en_MY:'/my'};
   const t=request.target||{}, prefix=bases[t.checkout_locale];
-  if(location.href==='about:blank'||window.__appleCheckoutDeparting)return {stage:'LOADING'};
-  if(!prefix||location.protocol!=='https:'||! /^(?:www|secure[0-9]+\.www|secure\.store|store)\.apple\.com$/.test(location.hostname)||!location.pathname.startsWith(prefix+'/shop/'))return {stage:'FOREIGN'};
+  if(location.href.startsWith('about:blank')||window.__appleCheckoutDeparting)return {stage:'LOADING'};
+  if(!prefix||location.protocol!=='https:'||! /^(?:www|secure[0-9]+\.www|secure[0-9]*\.store|store)\.apple\.com$/.test(location.hostname)||!location.pathname.startsWith(prefix+'/shop/'))return {stage:'FOREIGN'};
+  if(document.readyState==='loading')return {stage:'LOADING'};
   const root=document.querySelector('main,[role=main],#main')||document.body;
   if(!root)return {stage:'LOADING'};
   const norm=x=>String(x||'').normalize('NFKC').replace(/\s+/g,'').toLowerCase();
@@ -39,15 +40,23 @@ function regionalCheckout(request) {
   const dimensions=t.regional_product?.dimensions||{};
   function group(e){
     const c=ctx(e), a=e.getAttribute('data-autom')||'';
+    if(e.type==='checkbox'&&/pickupContact|isDaytimePhoneSelected/.test(c))return '';
+    if(a==='faq-button')return '';
+    if(a==='fulfillment-continue-button'||a==='continue-button-label')return 'continue';
+    if(a==='pickup-availablewindow-dropdown')return 'time';
+    if(a==='show-more-stores-button')return 'more_stores';
+    if(a==='fulfillment-pickup-store-search-button')return 'store_search_edit';
+    if(/storeLocator\.search$/i.test(e.id))return 'store_search';
     if(/quantity/i.test(c)&&e.tagName==='SELECT')return 'quantity';
-    if(/pickup.*date|checkin.*date/i.test(c))return 'date';
-    if(/pickup.*time|checkin.*time/i.test(c))return 'time';
+    if(/pickup[._-]?date|checkin[._-]?date/i.test(c))return 'date';
+    if(/pickup[._-]?time|checkin[._-]?time/i.test(c))return 'time';
     if(/store|retail/i.test(c)&&(e.type==='radio'||e.getAttribute('role')==='radio'))return 'store';
     for(const k of Object.keys(dimensions))if(k!=='familyType'&&norm(c).includes(norm(k)))return k;
     if(/applecare/i.test(c))return 'applecare';
     if(/trade.?in/i.test(c))return 'trade_in';
     if(/paymentoption|purchaseoption|full.?price|pay.?in.?full/i.test(c))return 'purchase';
-    if(/pickup|pick.?up|取貨|受け取り|受取/i.test(c))return 'pickup';
+    if(e.tagName!=='A'&&/pickup|pick.?up|取貨|受け取り|受取/i.test(c)&&
+       (t.checkout_locale!=='zh_HK'||label(e).trim()==='我會前來取貨'))return 'pickup';
     if(/add-to-cart|addtobag/i.test(a)||/^(?:add to bag|加入購物袋|加到購物袋|バッグに追加)$/i.test(label(e).trim()))return 'add';
     if(/^(?:check\s*out|結帳|結賬|ご注文手続きへ)$/i.test(label(e).trim())||a==='checkout')return 'checkout';
     if(/remove|移除|削除/i.test(label(e))&&e.closest('[data-autom="bag-item"],[data-autom="bag-item-list-item"],.rs-bag-item'))return 'remove';
@@ -55,7 +64,7 @@ function regionalCheckout(request) {
     return '';
   }
   const controls=elements.map(e=>{const g=group(e);const c=ctx(e);return {ref:ref(e),group:g,disabled:disabled(e),selected:selected(e),value:e.value||e.getAttribute('data-value')||'',label:label(e).trim(),matches:g==='store'?new RegExp('(?:^|[^A-Z0-9])'+t.store_id+'(?:$|[^0-9])').test([c,e.value,e.getAttribute('data-store-number')].join(' ')):!!dimensions[g]&&norm([e.value,e.getAttribute('data-value')].join(' ')).split(' ').includes(norm(dimensions[g])),options:e.tagName==='SELECT'?[...e.options].filter(o=>!o.disabled&&!o.parentElement.disabled).map(o=>({value:o.value,label:o.textContent.trim(),selected:o.selected})):[]};});
-  controls.forEach((c,i)=>{if(c.group==='store'){const e=elements[i];c.scope=e.name||ref(e.closest('fieldset,[role=radiogroup]')||root);}});
+  controls.forEach((c,i)=>{if(c.group==='checkout')c.autom=elements[i].getAttribute('data-autom')||'';if(c.group==='date'||c.group==='time')c.input_type=elements[i].tagName==='SELECT'?'select':'choice';if(c.group==='store'){const e=elements[i];c.scope=e.name||ref(e.closest('fieldset,[role=radiogroup]')||root);}});
   // Exact dimension comparison (never substring-match black vs spaceblack).
   controls.forEach((c,i)=>{if(dimensions[c.group]){const e=elements[i];c.matches=[e.value,e.getAttribute('data-value')].some(v=>norm(v)===norm(dimensions[c.group]));}});
   const fields=[...root.querySelectorAll('input:not([type=hidden]):not([type=radio]):not([type=checkbox]),select,textarea')].filter(visible).map(e=>({ref:ref(e),key:field(e),disabled:disabled(e),required:!!e.required||e.getAttribute('aria-required')==='true',filled:!!e.value,valid:e.getAttribute('aria-invalid')!=='true'&&(!e.validity||e.validity.valid),matches:!!field(e)&&!!e.value&&norm(e.value)===registry.expected.get(field(e)),options:e.tagName==='SELECT'?[...e.options].filter(o=>!o.disabled).map(o=>({value:o.value,label:o.textContent.trim()})):[]}));
@@ -63,12 +72,12 @@ function regionalCheckout(request) {
   const items=rows.map(row=>{
     const material=[row.getAttribute('data-part-number'),...row.querySelectorAll('[data-part-number],a[href]')].map(x=>typeof x==='string'?x:x?.getAttribute('data-part-number')||x?.getAttribute('href')||'').join(' ');
     let decoded='';try{decoded=decodeURIComponent(material);}catch{return {part:null,quantity:null,applecare:null};}
-    const parts=[...new Set([...decoded.matchAll(/\b[A-Z0-9]{5,12}\/A\b/g)].map(m=>m[0]))];
+    const parts=[...new Set([...decoded.matchAll(/\b[A-Z0-9]{5,12}\/A\b/gi)].map(m=>m[0].toUpperCase()))];
     const q=row.querySelector('select[name*=quantity],select[data-autom*=quantity]');
     const care=[...row.querySelectorAll('[data-autom*=applecare]')].filter(visible).some(e=>/AppleCare\+/.test(e.textContent));
     return {part:parts.length===1?parts[0]:null,quantity:q?Number(q.value):null,applecare:care,quantity_ref:q?ref(q):'',quantity_options:q?[...q.options].filter(o=>!o.disabled).map(o=>o.value):[]};
   });
-  const totalNodes=[...root.querySelectorAll('[data-autom="total"],[data-autom="bagtotal"],[data-autom="orderTotal"],[data-autom="order-summary-total"]')].filter(visible);
+  const totalNodes=[...root.querySelectorAll('[data-autom="total"],[data-autom="bagtotal"],[data-autom="bagtotalvalue"],[data-autom="orderTotal"],[data-autom="order-summary-total"]')].filter(visible);
   const currencies={HKD:/HK\$|HKD/,TWD:/NT\$|TWD/,JPY:/￥|¥|円|JPY/,SGD:/S\$|SGD/,AUD:/A\$|AUD/,MYR:/RM|MYR/,CNY:/RMB|CNY|人民幣|人民币/};
   const priceText=totalNodes.map(e=>e.textContent).join(' ');
   const currency=totalNodes.length>0&&totalNodes.every(e=>currencies[t.currency]?.test(e.textContent)||e.getAttribute('data-currency')===t.currency)&&
@@ -79,21 +88,32 @@ function regionalCheckout(request) {
   const errors=[...root.querySelectorAll('[role=alert],.form-message-error')].filter(visible).some(e=>!!e.textContent.trim());
   const availabilityText=[...root.querySelectorAll('[data-autom*=availability],[data-autom*=Availability],[role=alert]')].filter(visible).map(e=>e.textContent).join(' ');
   const soldOut=/currently unavailable|out of stock|no.*available.*pick.?up|暫無供應|無法取貨|無貨可取|在庫がありません|受け取れるストアがありません/i.test(availabilityText);
-  const bag_empty=rows.length===0&&/your bag is empty|購物袋是空的|購物袋內沒有商品|バッグに商品がありません|バッグは空です/i.test(text);
+  const emptyHeading=/^(?:yourbagisempty|(?:你的|您的)?購物袋(?:是空的|內沒有(?:任何)?商品|沒有任何項目)|バッグに商品がありません|バッグは空です)[。.!！]?$/i;
+  const bag_empty=rows.length===0&&[...root.querySelectorAll('h1,h2,[data-autom="bag-empty-message"]')]
+    .filter(visible).some(e=>emptyHeading.test(norm(e.textContent)));
   const productParts=[...new Set([...root.querySelectorAll('input[name="product"],input[name="partNumber"],input[name="part"],[data-autom="product-selection"][data-part-number]')].map(e=>e.value||e.getAttribute('data-part-number')).filter(v=>/^[A-Z0-9]{5,12}\/A$/.test(v||'')))];
   const product_part=productParts.length===1?productParts[0]:null;
-  const paymentVisible=[...root.querySelectorAll('input')].some(e=>visible(e)&&paymentField.test(ctx(e)))||/payment|billing/.test(path)||/^.*(?:付款方式|付款與帳單|お支払い方法|Payment method).*$/m.test(text);
-  let stage=/\/bag\/?$/.test(path)?'BAG':path.includes('/buy-iphone/')?'PRODUCT':paymentVisible?'PAYMENT':controls.some(c=>c.group==='store'||c.group==='pickup')?'FULFILLMENT':path.includes('/checkout')?'CONTACT':'UNKNOWN';
+  const paymentVisible=[...root.querySelectorAll('input')].some(e=>visible(e)&&paymentField.test(ctx(e)))||
+    [...root.querySelectorAll('[data-autom^="checkout-billingOptions-"]')].some(visible)||
+    /payment|billing/.test(path)||/^.*(?:付款方式|付款與帳單|お支払い方法|Payment method).*$/m.test(text);
+  const fulfillmentVisible=controls.some(c=>c.group==='store'||c.group==='pickup')||elements.some(e=>e.getAttribute('data-autom')==='fulfillment-continue-button');
+  const contactVisible=fields.some(f=>['family_name','given_name','phone','email','address','province','city','district'].includes(f.key));
+  let stage=/\/bag\/?$/.test(path)?'BAG':path.includes('/buy-iphone/')?'PRODUCT':paymentVisible?'PAYMENT':path.includes('/checkout')&&contactVisible?'CONTACT':fulfillmentVisible?'FULFILLMENT':path.includes('/checkout')?'LOADING':'UNKNOWN';
+  // The document may be complete before Apple's bag hydrates, or between a
+  // successful removal and the empty heading. Neither is proof of emptiness.
+  const bag_loading=stage==='BAG'&&rows.length===0&&!bag_empty&&!errors;
+  if(bag_loading)stage='LOADING';
   if(elements.some(e=>final.test(label(e))))stage='REVIEW';
   if(soldOut&&stage!=='REVIEW')stage='SOLD_OUT';
   // Fingerprint covers live values but exposes only a hash, never PII.
   const state=JSON.stringify([path,stage,controls,items,total,currency,errors,product_part,fields.map(f=>[f.ref,f.matches,f.valid]),[...root.querySelectorAll('input,select,textarea')].filter(visible).map(e=>[ref(e),e.value,e.checked])]);
   let hash=2166136261;for(const ch of state){hash^=ch.charCodeAt(0);hash=Math.imul(hash,16777619);}
   const fingerprint=registry.doc+':'+(hash>>>0).toString(16);
-  const snapshot={stage,fingerprint,controls,fields,items,total,currency,errors,bag_empty,product_part};
+  const snapshot={stage,fingerprint,controls,fields,items,total,currency,errors,bag_empty,bag_loading,product_part};
   if(!request.command)return snapshot;
   const cmd=request.command;
-  if(cmd.kind==='submit_order'||!cmd.nonce||cmd.expected!==fingerprint)return {result:'refused'};
+  if(cmd.kind==='submit_order'||!cmd.nonce)return {result:'refused'};
+  if(cmd.expected!==fingerprint)return {result:'stale',dispatched:false};
   if(registry.done.has(cmd.nonce))return {result:'duplicate'};
   const e=registry.refs.get(cmd.ref);
   if(!e||!e.isConnected||!visible(e)||disabled(e)||final.test(label(e))||agreement.test(label(e)))return {result:'refused'};
@@ -112,6 +132,13 @@ function regionalCheckout(request) {
     const value=request.profile?.[f.key];if(!value||e.tagName==='SELECT')return {result:'refused'};
     registry.done.add(cmd.nonce);registry.expected.set(f.key,norm(value));const proto=e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto,'value').set.call(e,value);
+    e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));e.blur();return {result:'dispatched'};
+  }
+  if(cmd.kind==='search_location'&&f?.key==='pickup_location'&&stage==='FULFILLMENT'&&e.tagName==='INPUT'){
+    const value=t.regional_store?.address?.city;
+    if(!value||cmd.value!==value)return {result:'refused'};
+    registry.done.add(cmd.nonce);registry.expected.set('pickup_location',norm(value));
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,value);
     e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));e.blur();return {result:'dispatched'};
   }
   return {result:'refused'};

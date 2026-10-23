@@ -6,6 +6,18 @@ import regions from "@/lib/regions-2025.json";
 import checkoutRegions from "@/lib/checkout-regions.json";
 
 type Region = {name:string; code:string; children?:Region[]};
+// 北京、天津、上海、重庆：省份本身就是城市，下一级直接是区县。
+const municipalities = new Set(['11','12','31','50']);
+function regionCities(province?:Region):Region[] {
+  if (!province) return [];
+  return municipalities.has(province.code)
+    ? [{name:province.name,code:province.code,children:province.children}]
+    : province.children || [];
+}
+function regionDistricts(city?:Region):Region[] {
+  // 不设区县的城市（如东莞、中山）在 Apple 官网上区县一栏填的就是城市本身。
+  return city ? city.children?.length ? city.children : [{name:city.name,code:city.code}] : [];
+}
 const fields: [string,string][] = [["family_name","姓氏"],["given_name","名字"],["phone","手机号"],
   ["email","邮箱"],["address","详细地址"],["postal_code","邮编"],["id_last4","证件后四位"],
   ["invoice_title","发票抬头（选填）"],["tax_id","税号（选填）"]];
@@ -16,9 +28,8 @@ export function ContactProfile({locked,locale='zh_CN',beforeSave}:{locked:boolea
   const [message,setMessage]=useState("");
   const provinces:Region[]=regions;
   const province=provinces.find(r=>r.name===profile.province);
-  const direct=!!province?.children?.length && !province?.children?.[0]?.children;
-  const cities=direct ? [{name:province!.name,code:province!.code,children:province!.children}] : province?.children || [];
-  const districts=cities.find(r=>r.name===profile.city)?.children || [];
+  const cities=regionCities(province);
+  const districts=regionDistricts(cities.find(r=>r.name===profile.city));
   const local=checkoutRegions.find(r=>r.locale===locale)!;
   const foreign=locale!=='zh_CN';
   const localFields: [string,string][] = foreign ? [
@@ -35,10 +46,8 @@ export function ContactProfile({locked,locale='zh_CN',beforeSave}:{locked:boolea
       if(foreign){setProfile(raw);setMessage("已读取本地区独立保存的资料。");return;}
       const same=(a:string,b:string)=>a===b||a.replace(/[省市]$/,'')===b.replace(/[省市]$/,'');
       const p=provinces.find(r=>same(r.name,raw.province||''));
-      const direct=!!p?.children?.length&&!p.children[0]?.children;
-      const cities=direct?[{name:p!.name,code:p!.code,children:p!.children}]:p?.children||[];
-      const c=cities.find(r=>same(r.name,raw.city||''));
-      const d=c?.children?.find(r=>r.name===raw.district);
+      const c=regionCities(p).find(r=>same(r.name,raw.city||''));
+      const d=regionDistricts(c).find(r=>r.name===raw.district);
       setProfile({...raw,province:p?.name||'',city:c?.name||'',district:d?.name||''});
       if(!p||!c||!d)setMessage("资料已读取，请重新选取省份、城市和区县后保存。");
     }

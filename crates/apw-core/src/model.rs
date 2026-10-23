@@ -51,22 +51,13 @@ impl Availability {
         }
     }
 
-    /// Apple 正常回了数据，但这款在这家店还没开放到店取货：`pickupDisplay` 为
-    /// `default`，新品开售前查到的就是这个。仍然是未知，不能当成无货。
-    pub fn is_pickup_not_open(&self) -> bool {
-        matches!(
-            self,
-            Self::Unknown(UnknownReason::SchemaDrift { field, raw })
-                if field == "pickupDisplay" && raw == "default"
-        )
-    }
-
     /// 供界面展示的中文描述。
     pub fn label(&self) -> &'static str {
         match self {
             Self::InStock => "有货",
             Self::OutOfStock => "无货",
             Self::Unknown(UnknownReason::NotYetChecked) => "待查询",
+            Self::Unknown(UnknownReason::PickupPending) => "未开放",
             Self::Unknown(_) => "未知",
         }
     }
@@ -97,6 +88,10 @@ pub enum UnknownReason {
     Blocked { detail: String },
     /// 触发了频率限制，正在退避。
     RateLimited,
+    /// Apple 正常回了数据，但这款在这家店还没开放到店取货（`pickupDisplay` 为
+    /// `default`，新品开售前就是这样）。不代表无货，也不算故障：不告警、不退避，
+    /// 退避会把间隔拉长，开放那一刻就晚了。
+    PickupPending,
     /// 响应能解析成 JSON，但结构与预期不符 —— 通常意味着 Apple 又改了接口。
     ///
     /// 必须让用户看见。带上出问题的字段与原始取值，否则排查时无从下手。
@@ -114,7 +109,7 @@ impl UnknownReason {
             Self::NotYetChecked => "尚未查询".to_string(),
             Self::Blocked { detail } => format!("请求被 Apple 拦截：{detail}"),
             Self::RateLimited => "请求过于频繁被限流，正在退避".to_string(),
-            Self::SchemaDrift { field, raw } if field == "pickupDisplay" && raw == "default" => {
+            Self::PickupPending => {
                 "Apple 暂未开放这款在该店的到店取货（官网状态 default），开放后会自动显示有货或无货"
                     .to_string()
             }
@@ -128,9 +123,10 @@ impl UnknownReason {
 
     /// 这个原因是否代表一次真正的故障。
     ///
-    /// `NotYetChecked` 只是还没轮到，不该被算进失败数，也不该触发告警或退避。
+    /// `NotYetChecked` 只是还没轮到，`PickupPending` 是 Apple 明确说还没开放，
+    /// 都不该被算进失败数，也不该触发告警或退避。
     pub fn is_failure(&self) -> bool {
-        !matches!(self, Self::NotYetChecked)
+        !matches!(self, Self::NotYetChecked | Self::PickupPending)
     }
 }
 

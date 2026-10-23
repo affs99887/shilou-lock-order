@@ -1208,3 +1208,58 @@ async fn 请求预算会把等待拉长并在事件里说明() {
     let (_, paced, _) = cycle_complete(&events);
     assert!(!paced);
 }
+
+/// 一轮跑完后：下一轮要等几秒、有没有告警、目标状态。官网状态经过真实的翻译函数。
+async fn first_cycle_with(display: &str) -> (u64, bool, Availability) {
+    let parsed = apw_core::apple::availability_from(display);
+    let fake =
+        FakeFetcher::new(move |_, store, parts| Ok(ok_response(store, parts, parsed.clone())));
+    let (w, mut rx) = Watcher::spawn(
+        fake,
+        WatcherConfig {
+            interval: Duration::from_secs(1),
+            ..fast_config()
+        },
+    );
+    w.set_targets(vec![target("R683", "MK2N4CH/A")]).await;
+    w.start().await;
+    let events = wait_cycle(&mut rx).await;
+    w.stop().await;
+    let next = events
+        .iter()
+        .find_map(|e| match e {
+            Event::CycleComplete {
+                next_check_in_secs, ..
+            } => Some(*next_check_in_secs),
+            _ => None,
+        })
+        .expect("应当有一轮结束");
+    let trouble = events.iter().any(|e| matches!(e, Event::Trouble { .. }));
+    (next, trouble, w.snapshot().await[0].availability.clone())
+}
+
+#[tokio::test]
+async fn 暂未开放到店取货时不退避也不告警但仍是未知() {
+    // 新品开售前 Apple 回 pickupDisplay=default。退避会把间隔拉长，开放那一刻就晚了；
+    // 它也不是接口变了，不该挂「等待程序更新」的告警。
+    let (next, trouble, availability) = first_cycle_with("default").await;
+    assert_eq!(next, 1, "不该退避");
+    assert!(!trouble, "不该告警");
+    assert_eq!(
+        availability,
+        Availability::Unknown(UnknownReason::PickupPending),
+        "仍是未知，不能当成无货"
+    );
+    assert!(!availability.is_failure());
+    assert!(
+        availability
+            .describe_reason()
+            .is_some_and(|r| r.contains("暂未开放")),
+        "{availability:?}"
+    );
+
+    // 真正认不出来的取值照旧：告警并退避。
+    let (next, trouble, _) = first_cycle_with("something-new").await;
+    assert_eq!(next, 2, "整店都认不出来时应当退避");
+    assert!(trouble, "整店都认不出来时应当告警");
+}

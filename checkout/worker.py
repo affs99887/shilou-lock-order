@@ -136,9 +136,44 @@ class Checkout(core.Service):
         self.trace = []
         self.trace_mark = None
         self.login_reminder_at = None
+        # 官网显示「找不到页面」时自动重开的次数和下一次重开的时刻。
+        self.missing_retries = 0
+        self.missing_retry_at = None
         self.update(session='开始选购时检查官网登录状态；仅在官网要求时由本人认证')
 
-    def record_diagnostic(self, stage, status=0, action="", result=""):
+    def command(self, name):
+        if name in ('rehearse', 'stop'):
+            self.missing_retries = 0
+            self.missing_retry_at = None
+        return super().command(name)
+
+    def can_recover_missing(self):
+        return (callable(getattr(self.browser, 'reopen_failed_entry', None)) and
+                self.phase in ('CLEAR_BAG', 'RUN') and
+                not self.owner.order_guard.blocked and not self.submission_deadline and
+                not self.access_blocked and not self.owner.cancel.is_set())
+
+    def recover_missing_page(self, snapshot, now):
+        """官网显示「找不到页面」：隔 1 秒、3 秒各重开一次购物袋，不重复删除或加购。
+
+        自动选购、手动开始、演练和库存表「立即选购」都走这里；两次都打不开才结束这次选购。"""
+        if snapshot.get('stage') != 'NOT_FOUND' or not self.can_recover_missing():
+            return False
+        if self.phase == 'CLEAR_BAG' and self.pending_remove and now - self.phase_since > 30:
+            return False  # 移除结果已超过 30 秒未确认：不再重开，交给购物袋检查停下
+        if self.missing_retries >= 2:
+            self.owner.retryable_end = True
+            self.owner.end_reason = '官网页面重开 2 次后仍打不开'
+            self.attention('官网页面重开 2 次后仍打不开')
+            return True
+        self.missing_retries += 1
+        self.missing_retry_at = now + (1 if self.missing_retries == 1 else 3)
+        self.update(mode='recovering', stage='NOT_FOUND', intervention=None,
+                    reason=f'官网页面暂时打不开，正在自动重开并核对购物袋（{self.missing_retries}/2）')
+        self.last_handoff = None
+        return True
+
+    def record_diagnostic(self, stage, status=0, action="", result="", diagnostics=None):
         # Fixed internal enums only. Never store DOM, URLs, contacts or cookies.
         allowed_stages = {"LOADING","PRODUCT","BAG","FULFILLMENT","CONTACT","PAYMENT",
                           "REVIEW","READY","BLOCKED","NOT_FOUND","LOGIN","CAPTCHA",
@@ -149,7 +184,7 @@ class Checkout(core.Service):
                            "method_pickup","method_delivery","store","payment",
                            "continue_FULFILLMENT","continue_CONTACT","continue_PAYMENT",
                            "review_edit_fulfillment","review_edit_contact","review_edit_payment",
-                           "bag_recheck"}
+                           "bag_recheck","page_reopen"}
         fixed_actions = {
             "清空购物袋：移除一项（可重新加购）": "remove_cart_item",
             "official_installment_payment_0": "installment_provider",
@@ -174,11 +209,21 @@ class Checkout(core.Service):
         action = action if action in allowed_actions else ""
         result = result if result in ("dispatched","stale","refused","duplicate") else ""
         status = status if type(status) is int and 100 <= status <= 599 else 0
-        mark = (stage, status, action, result)
+        # Edge 能看出被拒的是哪类请求；这里只记几个固定的是／否标记和状态码，不记网址。
+        diagnostics = diagnostics or {}
+        flags = {key: diagnostics[key] for key in (
+            "access_document", "access_shop_request", "access_availability",
+            "access_configuration", "access_bag", "edge_availability_unknown",
+            "edge_auxiliary_wait") if type(diagnostics.get(key)) is bool}
+        auxiliary_status = diagnostics.get("edge_auxiliary_http_status", 0)
+        if type(auxiliary_status) is int and 100 <= auxiliary_status <= 599:
+            flags["edge_auxiliary_http_status"] = auxiliary_status
+        mark = (stage, status, action, result, tuple(sorted(flags.items())))
         if mark == self.trace_mark:
             return
         self.trace_mark = mark
-        self.trace.append(dict(time=time.time(), stage=stage, http_status=status, action=action, result=result))
+        self.trace.append(dict(time=time.time(), stage=stage, http_status=status, action=action, result=result,
+                               diagnostics=flags))
         self.trace = self.trace[-120:]
         try:
             core.atomic_json(self.owner.data / 'checkout-diagnostics.json', {"events": self.trace})
@@ -197,6 +242,29 @@ class Checkout(core.Service):
         return super().update(**fields)
 
     def tick(self):
+        if self.owner.cancel.is_set():
+            return
+        if self.missing_retry_at is not None:
+            if time.monotonic() < self.missing_retry_at:
+                return
+            self.missing_retry_at = None
+            # 移除结果还没确认时沿用原来的 30 秒期限，重开不延长它。
+            keep_deadline = self.phase == 'CLEAR_BAG' and self.pending_remove
+            # 只重开购物袋这个只读入口，不重放结果未确认的删除或加购。
+            reopened = self.browser.reopen_failed_entry('https://www.apple.com.cn/shop/bag')
+            self.record_diagnostic("ACTION", action="page_reopen")
+            if reopened and (not self.attempt or not self.attempt.add_submitted):
+                self.phase = 'CLEAR_BAG'
+                self.attempt = None
+            elif reopened and self.phase == 'RUN':
+                # 已加购后回到购物袋：放开一次结账点击，否则会一直等上一次结账跳转。
+                # 加购、改数量等其余操作记录保留，不会重复执行。
+                self.attempt.sent.pop('checkout', None)
+                self.attempt.action_times.pop('checkout', None)
+            if not keep_deadline:
+                self.phase_since = time.monotonic()
+            self.update(mode='running', reason='页面已重新打开，正在核对购物袋后继续原配置', intervention=None)
+            return
         super().tick()
         if self.status.get('mode') == 'ready' and self.formal_submission():
             self.submit_once()
@@ -299,7 +367,8 @@ class Checkout(core.Service):
         elif snapshot.get('stage') in ('PRODUCT','BAG','FULFILLMENT','CONTACT','PAYMENT','REVIEW'):
             self.access_blocked = False
         self.record_diagnostic(snapshot.get('stage'), snapshot.get('http_status') or
-                               snapshot.get('diagnostics', {}).get('document_http_status', 0))
+                               snapshot.get('diagnostics', {}).get('document_http_status', 0),
+                               diagnostics=snapshot.get('diagnostics', {}))
         diag=snapshot.get('diagnostics',{})
         kind = ('privacy' if diag.get('privacy_consent_required') else
                 'phone' if snapshot.get('contact_verification_required') else
@@ -307,9 +376,9 @@ class Checkout(core.Service):
                 'captcha' if snapshot.get('stage')=='CAPTCHA' else
                 'expired' if snapshot.get('stage')=='SESSION_EXPIRED' else
                 'not_found' if snapshot.get('stage')=='NOT_FOUND' else None)
-        if kind == 'not_found' and self.phase == 'CLEAR_BAG' and self.pending_remove:
-            # clear_tick first decides whether its one cart read-back is still
-            # available. A real stop calls attention/notify in the same tick.
+        if kind == 'not_found' and (self.can_recover_missing() or
+                                    (self.phase == 'CLEAR_BAG' and self.pending_remove)):
+            # 先自动重开或重新读取购物袋，用完次数还不行时再通知本人。
             return
         if kind:self.require_user_action(kind)
         elif ((self.status.get('intervention') or {}).get('kind') in ('login','privacy','phone','captcha') or
@@ -323,8 +392,16 @@ class Checkout(core.Service):
             # 手动开始和演练共用同一套单次流程，提示里别写成「演练」。
             reason = reason.replace('单次演练超过 5 分钟', '手动选购超过 5 分钟')
         if self.access_blocked:
-            code = self.status.get('diagnostics', {}).get('access_http_status', 0)
+            diagnostics = self.status.get('diagnostics', {})
+            code = diagnostics.get('access_http_status', 0)
+            # Edge 能分辨被拒的是哪类请求，写进提示里方便判断；Safari 看不到，就不写。
+            component = ('库存／配送查询接口' if diagnostics.get('access_availability') else
+                         '选配更新接口' if diagnostics.get('access_configuration') else
+                         '购物袋接口' if diagnostics.get('access_bag') else
+                         '网页' if diagnostics.get('access_document') else
+                         '商店请求' if diagnostics.get('access_shop_request') else '')
             reason = ('Apple 返回 HTTP ' + str(code) if code in (403,429,541) else 'Apple 拒绝访问') + \
+                ('（' + component + '）' if component else '') + \
                 '；选购已暂停，库存监控同步停止。请先核对购物袋，不重复加购。'
         super().attention(reason)
         if self.handoff_kind()=='phone' and self.attempt and self.attempt.bag_verified and not self.owner.cancel.is_set():
@@ -913,7 +990,9 @@ class Bridge:
                             self.reserved = False
                         self.release()
                     mode = self.service.status.get('mode')
-                    if self.single_run and mode in ('ready', 'submitting', 'awaiting_payment'):
+                    # 停在核对页等本人处理也算走到过核对页：本人可能就在那一页手动下了单。
+                    if self.single_run and (mode in ('ready', 'submitting', 'awaiting_payment') or
+                                            self.service.status.get('stage') in ('REVIEW', 'READY')):
                         self.reached_review = True
                     plain_end = (self.retryable_end and not self.order_guard.blocked and
                                  mode == 'attention' and not self.stopping)
@@ -935,7 +1014,7 @@ class Bridge:
                     elif plain_end and self.armed:
                         self.avoid_until[self.current_key] = time.monotonic() + 30
                         self.service.command('stop')
-                        self.service.update(reason='官网明确无货或超预算，等待新库存后选择其他目标')
+                        self.service.update(reason='这次没买到：' + (self.end_reason or '官网明确无货或超预算') + '；等待新库存后再选购')
                         self.release()
                         self.cancel.set()
                         self.retryable_end = False

@@ -10,6 +10,21 @@ test('disabled target color with enabled siblings is not sufficient evidence of 
  const w=page();const s=w.appleCheckout({target:{name:'iPhone 18 Pro',color:'银色',capacity:'512GB'}});
  assert.equal(s.stage,'PRODUCT');assert.equal(s.variant_unavailable,false);assert.equal(s.sold_out,false);w.close();
 });
+test('recognizable product HTML cannot be clicked before document load completes',()=>{
+ const w=page(),calls=[];let ready='interactive';
+ // Use a new document because page() defines its readyState non-configurably.
+ const v=new JSDOM('<main><h1>购买 iPhone 18 Pro</h1><label><input type="radio">不加 AppleCare+ 服务计划</label></main>',
+  {url:'https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro',runScripts:'outside-only'}).window;
+ v.HTMLElement.prototype.getClientRects=()=>[{}];
+ Object.defineProperty(v.document,'readyState',{get:()=>ready});
+ v.performance.getEntriesByType=()=>[];v.eval(code);
+ v.document.querySelector('input').onclick=()=>calls.push('click');
+ assert.equal(v.appleCheckout({}).stage,'LOADING');
+ assert.equal(v.appleCheckout({command:{kind:'click'}}).result,'stale');
+ assert.equal(calls.length,0);
+ ready='complete';assert.equal(v.appleCheckout({}).stage,'PRODUCT');
+ v.close();w.close();
+});
 test('explicit scoped stock metadata still identifies a disabled variant',()=>{
  const w=page('data-availability="out-of-stock"');
  assert.equal(w.appleCheckout({target:{name:'iPhone 18 Pro',color:'银色',capacity:'512GB'}}).variant_unavailable,true);w.close();

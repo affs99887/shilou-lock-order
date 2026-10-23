@@ -174,6 +174,23 @@ class Safari:
         if self.window == window:
             self.window = 0
 
+    def reopen_failed_entry(self, url):
+        """Close only our still-failed tab; keep unrelated windows/tabs intact."""
+        window = self.window
+        if window:
+            probe = r"(/\/shop\/404\/?$/.test(location.pathname) || /pagenotfound|thepageyou[’']relookingforcan[’']tbefound|找不到你要的页面|未找到页面|你要查找的网页找不到|找不到网页|找不到網頁|找不到页面|页面未找到/.test((document.title + document.body.innerText).replace(/\s/g,'').toLowerCase()) ? 'FAILED' : 'RECOVERED')"
+            result = self.script(self.bound(
+                'set pageState to do JavaScript ' + json.dumps(probe, ensure_ascii=False) + ' in checkoutTab\n'
+                'if pageState is not "FAILED" then return "RECOVERED"\n'
+                'close checkoutTab\nreturn "CLOSED"'))
+            if result == 'RECOVERED':
+                return False
+            if result not in ('CLOSED', 'LOST_TAB'):
+                raise RuntimeError('无法确认选购页面状态；未关闭其他窗口')
+            self.forget_entry_window(window)
+        self.open(url, foreground=True)
+        return True
+
     def rotate_entry(self, url):
         """Pre-add entry only: discard stale standby references, never adopt tabs.
 
@@ -697,6 +714,10 @@ class Service:
             "edge_navigation_pending":bool,"edge_presentation_failed":bool,
             "edge_navigation_retries":int,
             "access_http_status":int,"access_document":bool,"access_shop_request":bool,
+            "access_availability":bool,"access_configuration":bool,"access_bag":bool,
+            "edge_product_loading":bool,"edge_product_pending":int,"edge_product_settling":bool,
+            "edge_auxiliary_error_count":int,"edge_availability_unknown":bool,
+            "edge_auxiliary_http_status":int,"edge_auxiliary_wait":bool,
             "document_http_status":int}
         raw = snapshot.get("diagnostics", {})
         safe = {k:raw[k] for k,t in allowed.items() if type(raw.get(k)) is t}
@@ -1056,6 +1077,7 @@ class Service:
         if result.get("stage") == "LOADING":
             result = {"result":"stale"}
         rejection_labels = {"element_replaced":"页面重绘替换了原控件，重新识别",
+            "product_updating":"商品页面或选配结果尚未加载完成，等待后重新核对",
             "access_denied":"官网拒绝访问，未执行本次操作",
             "page_not_found":"官网返回 404，未执行本次操作",
             "element_disabled":"控件临时不可用，重新识别", "control_changed":"控件状态变化，重新识别",
@@ -1085,6 +1107,9 @@ class Service:
                 self.pending_remove = None
         if result.get("result") not in ("dispatched", "stale"):
             self.attention("本地操作检查暂停：" + rejection + "（步骤：" + decision.reason + "）")
+
+    def recover_missing_page(self, snapshot, now):
+        return False
 
     def tick(self):
         now, wall = time.monotonic(), time.time()
@@ -1118,9 +1143,22 @@ class Service:
         s = self.browser.call(self.profile, target)
         self.observe_diagnostics(s)
         now = time.monotonic()
+        if self.recover_missing_page(s, now):
+            return
         if self.attempt and self.attempt.started is not None:
             self.update(elapsed=self.attempt.elapsed(now))
         self.update(stage=s.get("stage", "UNKNOWN"), last_check=wall)
+        read_wait = s.get("read_wait_seconds", 0)
+        if isinstance(read_wait, (float, int)) and read_wait > 0 and s.get("stage") == "LOADING":
+            # An explicit Retry-After on a read request is not a failed cart
+            # write. Wait without clicking/reloading or losing the attempt.
+            self.phase_since = now
+            if self.attempt:
+                self.attempt.last_progress = now
+                self.attempt.stage_entered = now
+            self.update(reason="辅助查询要求等待；保留选购页面，等待后重新核对",
+                        next_retry=wall + read_wait)
+            return
         if s.get("http_status") in (403,429,541) or s.get("stage") == "BLOCKED":
             until = self.breaker.reject(wall, retry_after_seconds(str(s.get("retry_after", "")), wall))
             self.persist_cooldown()

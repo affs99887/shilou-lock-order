@@ -32,3 +32,59 @@ test('phone verification and privacy consent expose safe handoff flags',()=>{
  w.document.body.insertAdjacentHTML('beforeend','<div role="dialog"><h2>Apple 和你的数据隐私</h2></div>');
  assert.equal(w.appleCheckout({}).diagnostics.privacy_consent_required,true);w.close();
 });
+test('fresh pickup region button with false accessible label remains actionable',()=>{
+ const w=page('<p>搜索此地附近的零售店：</p><button data-autom="fulfillment-pickup-store-search-button" aria-label="false" aria-expanded="false">选择地区</button><p>选择一个地点，查看附近零售店的供货情况。</p>');
+ let s=w.appleCheckout({}),editors=s.controls.filter(c=>c.group==='pickup_region_edit');
+ assert.equal(editors.length,1);assert.equal(s.pickup_region_open,false);
+ w.document.querySelector('button').setAttribute('aria-expanded','true');
+ s=w.appleCheckout({});assert.equal(s.pickup_region_open,true);w.close();
+});
+test('arbitrary false labels or non-pickup location controls are not pickup editors',()=>{
+ for(const attrs of ['aria-label="false" aria-expanded="false"',
+   'data-autom="delivery-location" aria-label="false" aria-expanded="false"',
+   'data-autom="fulfillment-pickup-store-search-button" aria-label="false"']){
+  const w=page('<button '+attrs+'>选择地区</button>');
+  assert.equal(w.appleCheckout({}).controls.filter(c=>c.group==='pickup_region_edit').length,0);w.close();
+ }
+});
+test('review contact email requires unique visible scoped evidence',()=>{
+ for(const [body,expected] of [
+  ['<section class="rs-review-contact">demo@example.test</section>',true],
+  ['<section class="rs-review-contact">other@example.test</section>',false],
+  ['<section class="rs-review-contact">demo@example.test other@example.test</section>',false],
+  ['<section class="rs-review-contact" hidden>demo@example.test</section>',false],
+  ['<footer>demo@example.test</footer>',false],
+  ['<h2>取货详情</h2><p>demo@example.test</p><h2>付款详情</h2>',true],
+ ]){
+  const w=page('<section data-autom="review-order">'+body+'</section>');
+  assert.equal(w.appleCheckout({profile:{email:'demo@example.test'}}).review_contact_email_matches,expected);
+  w.close();
+ }
+});
+test('review page reports whether the contact email matches, differs or is not shown at all',()=>{
+ for(const [body,expected] of [
+  ['<section class="rs-review-contact">demo@example.test</section>','match'],
+  ['<section class="rs-review-contact">other@example.test</section>','mismatch'],
+  ['<section class="rs-review-contact">demo@example.test other@example.test</section>','mismatch'],
+  // 邮箱不在联系区里也不能当作没显示：看得到就要能核对上。
+  ['<footer>demo@example.test</footer>','mismatch'],
+  ['<section class="rs-review-contact">张三 138****0000</section>','none'],
+  ['<section class="rs-review-contact" hidden>other@example.test</section>','none'],
+  ['<h2>取货详情</h2><p>Apple 上海环球港</p><h2>付款详情</h2>','none'],
+ ]){
+  const w=page('<section data-autom="review-order">'+body+'</section>');
+  assert.equal(w.appleCheckout({profile:{email:'demo@example.test'}}).review_contact_email,expected,body);
+  w.close();
+ }
+ const w=page('<section data-autom="review-order"></section>');
+ assert.equal(w.appleCheckout({profile:{}}).review_contact_email,null,'没保存邮箱时不判断');
+ w.close();
+});
+
+test('pickup destination requires every selected store to match the exact official ID',()=>{
+ for(const [id,expected] of [['R575',true],['R617',false],['',false]]){
+  const w=page('<label><input type="radio" name="retail-store" value="'+id+'" checked>Apple 武汉</label>');
+  const s=w.appleCheckout({target:{store:'Apple 武汉',store_id:'R575'}});
+  assert.equal(s.store_id_verified,expected);w.close();
+ }
+});

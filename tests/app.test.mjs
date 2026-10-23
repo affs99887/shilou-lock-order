@@ -151,10 +151,12 @@ test("pending and failed inventory remain distinguishable with their actual reas
     [{ reason: "rate_limited" }, "Apple 接口限流或暂时不可用，程序会延长间隔后重试。具体原因见查询日志。"],
     [{ reason: "transport", detail: "连接超时" }, "网络请求失败：连接超时"],
     [{ reason: "schema_drift", field: "pickupDisplay", raw: "changed" }, "接口返回结构与预期不符：pickupDisplay = changed"],
-    [{ reason: "schema_drift", field: "pickupDisplay", raw: "default" },
+    [{ reason: "pickup_pending" },
       "Apple 暂未开放这款在该店的到店取货（官网状态 default），开放后会自动显示有货或无货"],
     [{ reason: "apple_error", message: "服务不可用" }, "Apple 返回错误：服务不可用"],
   ];
+  // 还没轮到、还没开放取货都不是故障：弱化显示，也不计入「查询异常」。
+  const labels = { not_yet_checked: "待查询", pickup_pending: "未开放" };
   for (const [reason, detail] of cases) {
     app.state.rows = [{
       target: { locale: "zh_CN", storeNumber: "R575", storeTitle: "Apple 武汉",
@@ -164,8 +166,8 @@ test("pending and failed inventory remain distinguishable with their actual reas
     const node = app.all(e => typeof e.type === "function" && e.type.name === "StatusBadge")[0];
     const rendered = node.type(node.props);
     const badge = rendered.props.children[0].props.children.props.children;
-    const pending = reason.reason === "not_yet_checked";
-    assert.equal(badge.props.children, pending ? "待查询" : "未知");
+    const pending = reason.reason in labels;
+    assert.equal(badge.props.children, labels[reason.reason] ?? "未知");
     assert.equal(badge.props.className.includes("border-dashed"), pending);
     assert.equal(badge.props.className.includes("text-unknown"), !pending);
     assert.equal(rendered.props.children[1].props.children, detail);

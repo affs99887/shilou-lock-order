@@ -46,8 +46,16 @@ A manual start or rehearsal while auto checkout waits pauses auto checkout and
 resumes it when that single run ends, unless the run reached the review page,
 an order result is unverified, or Apple refused access. A definite sold-out,
 over-budget or not-yet-released result ends a single run without a stop click.
-The live cart-removal 404 observed in the prior candidate remains an outstanding
-acceptance item; offline tests do not constitute a verified live checkout.
+A page-not-found (404) during checkout reopens the cart entry of the app's own
+tab twice (after 1 s and 3 s); removals and adds are never replayed, and a
+post-add reopen allows one more checkout click. If both reopens fail, a single
+run ends by itself and auto checkout waits for the next stock. When the
+signed-in pickup contact page shows no email box, checkout continues once name,
+phone and ID suffix read back; on the review page a matching email or no email
+at all is accepted, and any other email stops before ordering. A pickupDisplay
+of `default` shows as not open yet, without backoff or alerts. These follow live
+observations from the maintainer's own build; offline tests here do not
+constitute a verified live checkout.
 
 Build on Mac: install locked frontend dependencies, run checkout/build.py with
 the build Python (PyInstaller/PyObjC), then `npm run tauri -- build --bundles app`.

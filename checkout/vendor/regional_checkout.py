@@ -29,7 +29,7 @@ def allowed_url(url, locale, navigation=False):
     p, base = urlsplit(url), urlsplit(region(locale)['base'])
     if p.scheme != 'https' or p.username or p.password or p.port not in (None, 443):
         return False
-    allowed = r'(?:www|secure[0-9]+\.www|secure\.store|store)\.apple\.com' + (r'\.cn' if locale == 'zh_CN' else '')
+    allowed = r'(?:www|secure[0-9]+\.www|secure[0-9]*\.store|store)\.apple\.com' + (r'\.cn' if locale == 'zh_CN' else '')
     if not re.fullmatch(allowed, p.hostname or ''):
         return False
     prefix = base.path + '/shop/'

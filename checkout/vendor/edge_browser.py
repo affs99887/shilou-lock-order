@@ -1,5 +1,6 @@
 """Owned Edge pages over loopback CDP. No personal browser attachment."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -148,6 +149,15 @@ class EdgeBrowser:
         self.presentation_failed = False
         self.shop_denials = {}
         self.navigation_retries = 0
+        self.product_requests = {}
+        self.product_stability = {}
+        self.denial_components = {}
+        self.document_generations = {}
+        self.request_generations = {}
+        self.request_sequence = 0
+        self.auxiliary_health = {}
+        self.auxiliary_versions = {}
+        self.auxiliary_wait = {}
 
     @staticmethod
     def validate_url(url):
@@ -179,6 +189,14 @@ class EdgeBrowser:
             self.dialogs.clear()
             self.last_status.clear()
             self.shop_denials.clear()
+            self.denial_components.clear()
+            self.product_requests.clear()
+            self.product_stability.clear()
+            self.document_generations.clear()
+            self.request_generations.clear()
+            self.auxiliary_health.clear()
+            self.auxiliary_versions.clear()
+            self.auxiliary_wait.clear()
             self.auth_health.clear()
             self.read_failures.clear()
             self.auth_submitted.clear()
@@ -188,8 +206,9 @@ class EdgeBrowser:
                 identity = self.window
                 self.window = 0
                 self.windows = [value for value in self.windows if value != identity]
-                for mapping in (self.pages,self.channels,self.dialogs,self.last_status,self.shop_denials,self.auth_health,self.read_failures,self.auth_submitted):
+                for mapping in (self.pages,self.channels,self.dialogs,self.last_status,self.shop_denials,self.denial_components,self.product_requests,self.product_stability,self.auth_health,self.read_failures,self.auth_submitted,self.document_generations,self.auxiliary_health,self.auxiliary_versions,self.auxiliary_wait):
                     mapping.pop(identity,None)
+                self.request_generations = {r:m for r,m in self.request_generations.items() if m[0] != identity}
         self.expected_path = ""
         self.login_since = None
         self.login_probe = None
@@ -200,6 +219,10 @@ class EdgeBrowser:
 
     def new_page(self):
         page = self.session.ensure().new_page()
+        return self.bind_page(page)
+
+    def bind_page(self, page):
+        """Attach the same guarded observers to a caller-owned native page."""
         identity = uuid.uuid4().hex
         self.pages[identity] = page
         channel = self.session.context.new_cdp_session(page)
@@ -207,7 +230,10 @@ class EdgeBrowser:
         channel.on("Page.javascriptDialogClosed", lambda _: self.dialogs.pop(identity, None))
         channel.send("Page.enable")
         self.window = identity
+        self.document_generations[identity] = 0
         page.on("response", lambda response: self.response(identity, page, response))
+        page.on("request", lambda request: self.request_started(identity, page, request))
+        page.on("requestfinished", lambda request: self.request_finished(identity, request))
         page.on("requestfailed", lambda request: self.request_failed(identity, request))
         # Leave native dialogs visible for the user, rather than Playwright's
         # default automatic dismissal. Never read their potentially private text.
@@ -215,14 +241,26 @@ class EdgeBrowser:
         return page
 
     def response(self, identity, page, response):
+        if not self.current_request(identity, response.request):
+            return
         # Keep only main-document status and Retry-After, never raw URLs/PII.
         if response.request.is_navigation_request() and response.frame == page.main_frame:
             self.last_status[identity] = (response.status, response.headers.get("retry-after", ""))
             self.shop_denials.pop(identity, None)
+            self.denial_components.pop(identity, None)
+            self.product_requests.pop(identity, None)
+            self.product_stability.pop(identity, None)
+            self.auxiliary_health.pop(identity, None)
+            self.auxiliary_versions.pop(identity, None)
+            # Retry-After is a deadline, not a document error. Navigation must
+            # not erase a server-requested waiting period.
+        elif self.shop_resource(response.request) and self.auxiliary_resource(response.request):
+            self.observe_auxiliary(identity, response)
         elif self.shop_resource(response.request) and response.status in (403, 429, 541):
             # Add-to-bag may fail through fetch without replacing the document.
             # Keep that ambiguous write visible; never retry it automatically.
             self.shop_denials[identity] = (response.status, response.headers.get("retry-after", ""))
+            self.denial_components[identity] = self.shop_component(response.request)
         key = self.auth_resource(response.request)
         if key:
             if response.request.method == "POST" and 200 <= response.status < 300:
@@ -236,6 +274,99 @@ class EdgeBrowser:
                     rows[key] = (response.status, response.headers.get("retry-after", ""), "")
             elif 200 <= response.status < 400:
                 self.auth_health.get(identity, {}).pop(key, None)
+
+    def request_started(self, identity, page, request):
+        if request.is_navigation_request() and request.frame == page.main_frame:
+            self.document_generations[identity] = self.document_generations.get(identity, 0) + 1
+            self.product_requests.pop(identity, None)
+            self.product_stability.pop(identity, None)
+        self.request_sequence += 1
+        self.request_generations[request] = (
+            identity, self.document_generations.get(identity, 0), self.request_sequence)
+        self.product_request(identity, request)
+
+    def current_request(self, identity, request):
+        metadata = self.request_generations.get(request)
+        # Legacy injected unit fixtures have no event subscription. Real owned
+        # pages always initialise a generation and reject untracked responses.
+        if metadata is None:
+            return identity not in self.document_generations
+        return metadata[:2] == (identity, self.document_generations.get(identity, 0))
+
+    def request_finished(self, identity, request):
+        if self.current_request(identity, request):
+            self.product_request_done(identity, request)
+        self.request_generations.pop(request, None)
+
+    @staticmethod
+    def auxiliary_resource(request):
+        # Positive read-only allowlist. Unknown endpoints, configuration
+        # updates and all mutations still fail closed.
+        if request.method not in ("GET", "HEAD"):
+            return False
+        path = urlparse(request.url).path.lower().rstrip("/")
+        return path in ("/shop/fulfillment-messages", "/shop/retail/pickup-message",
+                        "/shop/favoritesx/fetch", "/shop/api/product-gallery")
+
+    def observe_auxiliary(self, identity, response):
+        from checkout_engine import retry_after_seconds
+        request = response.request
+        # A digest distinguishes product queries without retaining session
+        # parameters or exposing them to diagnostics.
+        key = hashlib.sha256((request.method + " " + request.url).encode()).hexdigest()
+        metadata = self.request_generations.get(request)
+        sequence = metadata[2] if metadata else self.request_sequence + 1
+        versions = self.auxiliary_versions.setdefault(identity, {})
+        if sequence < versions.get(key, -1):
+            return
+        versions[key] = sequence
+        rows = self.auxiliary_health.setdefault(identity, {})
+        if response.status in (403, 429, 541) or response.status >= 500:
+            rows[key] = (self.shop_component(request), response.status)
+            delay = retry_after_seconds(response.headers.get("retry-after", ""), time.time())
+            if delay > 0:
+                self.auxiliary_wait[identity] = max(
+                    self.auxiliary_wait.get(identity, 0), time.monotonic() + delay)
+        elif 200 <= response.status < 300:
+            rows.pop(key, None)
+
+    def auxiliary_diagnostics(self):
+        rows = list(self.auxiliary_health.get(self.window, {}).values())
+        return {"edge_auxiliary_error_count": len(rows),
+                "edge_availability_unknown": any(kind == "availability" for kind, _ in rows),
+                "edge_auxiliary_http_status": rows[-1][1] if rows else 0}
+
+    def auxiliary_cooldown(self):
+        remaining = self.auxiliary_wait.get(self.window, 0) - time.monotonic()
+        if remaining <= 0:
+            return None
+        return {"stage": "LOADING", "read_wait_seconds": remaining,
+                "diagnostics": dict(self.auxiliary_diagnostics(), edge_auxiliary_wait=True)}
+
+    @staticmethod
+    def shop_component(request):
+        """Fixed diagnostic categories only. Never retain URLs or query values."""
+        path = urlparse(request.url).path.lower()
+        if path.startswith(("/shop/fulfillment-messages", "/shop/retail/pickup-message")):
+            return "availability"
+        if path.startswith("/shop/bag"):
+            return "bag"
+        if path.startswith("/shop/checkout"):
+            return "checkout"
+        if path.startswith(("/shop/updatesummary", "/shop/api/applecare", "/shop/api/product-gallery")):
+            return "configuration"
+        return "other"
+
+    def product_request(self, identity, request):
+        if self.shop_resource(request) and self.shop_component(request) in ("availability", "configuration"):
+            self.product_requests.setdefault(identity, set()).add(id(request))
+            self.product_stability.pop(identity, None)
+
+    def product_request_done(self, identity, request):
+        pending = self.product_requests.get(identity, set())
+        if id(request) in pending:
+            pending.discard(id(request))
+            self.product_stability.pop(identity, None)
 
     @staticmethod
     def shop_resource(request):
@@ -259,7 +390,10 @@ class EdgeBrowser:
             return {"stage": "BLOCKED", "http_status": status, "retry_after": retry,
                     "diagnostics": {"edge_browser": True, "access_http_status": status,
                                     "access_document": source == "document",
-                                    "access_shop_request": source == "shop_request"}}
+                                    "access_shop_request": source == "shop_request",
+                                    "access_availability": source == "shop_request" and self.denial_components.get(self.window) == "availability",
+                                    "access_configuration": source == "shop_request" and self.denial_components.get(self.window) == "configuration",
+                                    "access_bag": source == "shop_request" and self.denial_components.get(self.window) == "bag"}}
         return None
 
     @staticmethod
@@ -279,6 +413,11 @@ class EdgeBrowser:
             return None
 
     def request_failed(self, identity, request):
+        if not self.current_request(identity, request):
+            self.request_generations.pop(request, None)
+            return
+        self.product_request_done(identity, request)
+        self.request_generations.pop(request, None)
         key = self.auth_resource(request)
         if not key:
             return
@@ -324,6 +463,27 @@ class EdgeBrowser:
             return
         self.navigate(url, foreground)
 
+    def reopen_failed_entry(self, url):
+        """Replace only a confirmed failed owned tab with a safe bag read."""
+        self.validate_url(url)
+        failed = self.window
+        page = self.page()
+        if self.call({}, {}).get('stage') != 'NOT_FOUND':
+            return False
+        self.new_page()
+        self.navigate(url, foreground=True)
+        page.close()
+        self.windows = [identity for identity in self.windows if identity != failed]
+        for mapping in (self.pages, self.channels, self.dialogs, self.last_status,
+                        self.shop_denials, self.denial_components, self.product_requests,
+                        self.product_stability, self.document_generations, self.auth_health,
+                        self.read_failures, self.auth_submitted, self.auxiliary_health,
+                        self.auxiliary_versions, self.auxiliary_wait):
+            mapping.pop(failed, None)
+        self.request_generations = {request: mark for request, mark in self.request_generations.items()
+                                    if mark[0] != failed}
+        return True
+
     def navigate(self, url, foreground=False):
         path = self.validate_url(url)
         self.account_entry = bool(re.match(r"/shop/account(?:/|$)", path))
@@ -331,6 +491,13 @@ class EdgeBrowser:
         self.expected_path = path
         self.last_status.pop(self.window, None)
         self.shop_denials.pop(self.window, None)
+        self.denial_components.pop(self.window, None)
+        self.product_requests.pop(self.window, None)
+        self.product_stability.pop(self.window, None)
+        self.auxiliary_health.pop(self.window, None)
+        self.auxiliary_versions.pop(self.window, None)
+        # Invalidate outstanding responses even when goto fails before commit.
+        self.document_generations[self.window] = self.document_generations.get(self.window, 0) + 1
         self.auth_health.pop(self.window, None)
         self.read_failures.pop(self.window, None)
         self.auth_submitted.pop(self.window, None)
@@ -437,7 +604,9 @@ class EdgeBrowser:
             self.login_probe_started = time.monotonic()
             probe = EdgeBrowser(self.session, self.js)
             # Event handlers on either owned page update the same ledgers.
-            for name in ("pages","channels","dialogs","last_status","shop_denials","auth_health","read_failures","auth_submitted"):
+            for name in ("pages","channels","dialogs","last_status","shop_denials","auth_health","read_failures","auth_submitted",
+                         "denial_components","product_requests","product_stability","document_generations",
+                         "request_generations","auxiliary_health","auxiliary_versions","auxiliary_wait"):
                 setattr(probe,name,getattr(self,name))
             self.login_probe = probe
             try:
@@ -477,6 +646,9 @@ class EdgeBrowser:
             if denial:
                 # Check before injecting a command, not after a possible click.
                 return dict(denial, result="refused", reason="access_denied") if command else denial
+            waiting = self.auxiliary_cooldown()
+            if waiting:
+                return dict(waiting, result="stale", reason="product_updating") if command else waiting
             if self.last_status.get(self.window, (0, ""))[0] == 404:
                 result = {"stage": "NOT_FOUND", "http_status": 404,
                           "diagnostics": {"edge_browser": True, "document_http_status": 404}}
@@ -484,6 +656,24 @@ class EdgeBrowser:
             if self.dialogs.get(self.window):
                 # Read-only query pumps events, including manual dialog closure.
                 return {"stage":"UNKNOWN","diagnostics":{"visible_dialog":True}}
+            # Safari's Apple-event round trips used to mask this race. Edge
+            # returns at HTTP commit; an SSR form can be clickable before its
+            # scripts attach handlers. Never click that intermediate document.
+            product_page = isinstance(page.url, str) and "/shop/buy-iphone/" in urlparse(page.url).path
+            if product_page:
+                ready = self.evaluate("document.readyState")
+                pending = len(self.product_requests.get(self.window, ()))
+                if ready != "complete" or pending:
+                    self.product_stability.pop(self.window, None)
+                    waiting = {"stage": "LOADING", "diagnostics": {
+                        "edge_product_loading": ready != "complete",
+                        "edge_product_pending": pending}}
+                    return dict(waiting, result="stale", reason="product_updating") if command else waiting
+                if command:
+                    stable, since = self.product_stability.get(self.window, (None, time.monotonic()))
+                    if stable is None or stable != command.get("expected") or time.monotonic() - since < .35:
+                        return {"stage": "LOADING", "result": "stale", "reason": "product_updating",
+                                "diagnostics": {"edge_product_settling": True}}
             # The function registry stays on the document. Never persist a
             # snapshot, request payload, exception source, or storage_state.
             result = self.evaluate("(() => {" + self.js + "\nreturn " + self.entrypoint + "(" +
@@ -512,6 +702,22 @@ class EdgeBrowser:
             if status in (403,429,541):health.update(stage="BLOCKED",http_status=status,retry_after=retry)
             return health
         self.read_failures[self.window] = 0
+        if (product_page and not command and result.get("fingerprint")
+                and result.get("stage") not in ("LOADING", "UNKNOWN")):
+            # The official post-add accessory/attach screen can retain a
+            # /buy-iphone/ URL. Stabilize its own fingerprint too; otherwise
+            # every "view bag" click is forever rejected as product_updating.
+            fingerprint = result.get("fingerprint")
+            previous, since = self.product_stability.get(self.window, (None, time.monotonic()))
+            if fingerprint != previous:
+                since = time.monotonic()
+                self.product_stability[self.window] = (fingerprint, since)
+            # Readback must survive a short render/response settling window.
+            # No random delays, stealth settings, or retries of failed writes.
+            if time.monotonic() - since < .35:
+                return {"stage": "LOADING", "diagnostics": {"edge_product_settling": True}}
+        if product_page and command and result.get("result") == "dispatched":
+            self.product_stability.pop(self.window, None)
         health = self.login_health()
         result.setdefault("diagnostics",{}).update(health["diagnostics"])
         result['diagnostics'].update(edge_navigation_pending=self.navigation_pending,
@@ -547,9 +753,13 @@ class EdgeBrowser:
         denial = self.access_failure()
         if denial:
             return denial
+        waiting = self.auxiliary_cooldown()
+        if waiting and not command:
+            return waiting
         if status == 404:
             result.update(stage="NOT_FOUND", http_status=404)
         result.setdefault("diagnostics", {})["document_http_status"] = status
+        result["diagnostics"].update(self.auxiliary_diagnostics())
         if result.get("stage") not in (None, "LOADING"):
             self.expected_path = ""
             self.navigation_pending = False

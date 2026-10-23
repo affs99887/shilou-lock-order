@@ -47,6 +47,10 @@ fn 未知状态会扁平成两层判别字段() {
             json!({"kind": "unknown", "reason": "rate_limited"}),
         ),
         (
+            UnknownReason::PickupPending,
+            json!({"kind": "unknown", "reason": "pickup_pending"}),
+        ),
+        (
             UnknownReason::SchemaDrift {
                 field: "pickupDisplay".into(),
                 raw: "weird".into(),

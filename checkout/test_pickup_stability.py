@@ -1,6 +1,7 @@
 import copy
 import unittest
-from datetime import date
+from datetime import date, datetime
+from unittest.mock import patch
 from worker import DEFAULTS
 from checkout_engine import Attempt, variants, validate_preferences
 from pickup_monitor import checkout_date_decision,dates_in
@@ -15,6 +16,32 @@ class PickupStabilityTests(unittest.TestCase):
         return dict(stage='FULFILLMENT',fingerprint=fp,controls=[],fields=[],pickup_selected=True,store_selected=True,pickup_schedule=[])
     def date(self, label='10月23日', value='2026-10-23', selected=False):
         return dict(key='pickup_date',ref='date',kind='select',selected=selected,disabled=False,choices=[dict(ref='date',value=value,label=label,role='option',selected=selected,disabled=False)])
+    def test_confirmed_store_id_does_not_reopen_search_or_clear_slot(self):
+        a=self.attempt()
+        s=self.snapshot()
+        s.update(store_id_verified=True,pickup_date_selected=True,pickup_time_selected=False,
+                 region_picker=dict(context='pickup',kind='tabs',open=False,matched=False,configured=True,
+                                    reason='loading',next=dict(ref='search',key='region_pickup_open')),
+                 pickup_schedule=[self.date(selected=True),dict(key='pickup_time',ref='slot',id='slot',kind='select',selected=False,disabled=False,
+                    choices=[dict(ref='slot',value='23-19:15-19:30',label='19:15 – 19:30',role='option',selected=False,disabled=False)])])
+        decision=a.decide(s,0)
+        self.assertEqual(decision.key,'pickup_time')
+        s.update(fingerprint='slot-readback',pickup_time_selected=True,
+                 controls=[dict(ref='next',label='继续填写取货详情',role='button',selected=False,disabled=False)])
+        s['pickup_schedule'][1]['selected']=True
+        s['pickup_schedule'][1]['choices'][0]['selected']=True
+        decision=a.decide(s,1)
+        self.assertEqual(decision.ref,'next')
+        self.assertTrue(a.fulfillment_verified)
+
+    def test_search_region_guard_remains_without_exact_store_id_or_when_editor_open(self):
+        for patch in ({'store_id_verified':False},{'store_selection_conflict':True},{'pickup_region_open':True}):
+            a=self.attempt();s=self.snapshot()
+            s.update(store_id_verified=True,region_picker=dict(context='pickup',kind='tabs',open=False,matched=False,configured=True,
+                     reason='loading',next=dict(ref='search',key='region_pickup_open')))
+            s.update(patch)
+            self.assertEqual(a.decide(s,0).key,'region_pickup_open')
+
     def test_date_panel_can_arrive_after_store_without_immediate_attention(self):
         a=self.attempt();s=self.snapshot()
         self.assertEqual(a.decide(s,0).kind,'wait')
@@ -47,7 +74,9 @@ class PickupStabilityTests(unittest.TestCase):
         a=self.attempt();s=self.snapshot()
         self.assertEqual(a.decide(s,0).kind,'wait')
         self.assertEqual(a.decide(s,12).kind,'attention')
-    def test_earliest_date_ignores_stale_saved_dates_and_orders_actual_dates(self):
+    @patch('pickup_monitor.datetime', wraps=datetime)
+    def test_earliest_date_ignores_stale_saved_dates_and_orders_actual_dates(self, clock):
+        clock.now.return_value=datetime(2026,10,20)
         s=self.snapshot();p=self.date(label='October22',value='22')
         p['choices'] += [dict(ref='date',value='20',label='October20',role='option',selected=False,disabled=False),dict(ref='date',value='21',label='October21',role='option',selected=False,disabled=False)]
         s['pickup_schedule']=[p]
@@ -74,7 +103,9 @@ class PickupStabilityTests(unittest.TestCase):
             a.pickup_confirmed_dates=['2026-10-20']
             s=dict(stage='REVIEW',fingerprint='review',controls=[],fields=[],final_button=True,review_extras_match=True,review_items=[dict(target_matches=True,quantity=1,method='pickup',store_matches=True,pickup_dates=[actual])],review_target_matches=True,review_quantity=1,review_method='pickup',review_store_matches=True,review_applecare=False,total=9999,review_full_payment='支付宝',errors=False)
             self.assertEqual(a.decide(s,0).kind,expected)
-    def test_live_english_month_labels_and_day_only_values(self):
+    @patch('pickup_monitor.datetime', wraps=datetime)
+    def test_live_english_month_labels_and_day_only_values(self, clock):
+        clock.now.return_value=datetime(2026,10,20)
         for label in ('October20','Oct 20','OCT. 20th','October 20, 2026'):
             self.assertEqual(dates_in(label,today=date(2026,10,20)),['2026-10-20'])
         self.assertEqual(dates_in('20',today=date(2026,10,20)),[])

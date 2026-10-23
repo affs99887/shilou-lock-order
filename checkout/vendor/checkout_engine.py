@@ -273,6 +273,9 @@ class Attempt:
         self.bag_verified = False
         self.add_submitted = False
         self.contact_verified = False
+        # 登录后联系人页不显示邮箱时先放行，到核对页再看邮箱。
+        self.contact_email_deferred = False
+        self.contact_email_unshown = False
         self.fulfillment_verified = False
         self.deferred_pickup_verified = False
         self.payment_verified = False
@@ -294,6 +297,15 @@ class Attempt:
         self.pending_navigation = None
         self.payment_options_wait_since = None
 
+    def pickup_store_confirmed(self, s):
+        # Search location orders nearby stores; the selected official store ID
+        # is the pickup destination. Reopening search can reset its appointment.
+        return (self.method == "pickup" and s.get("stage") == "FULFILLMENT"
+                and s.get("store_selected") and s.get("store_id_verified")
+                and not s.get("store_selection_conflict")
+                and not s.get("pickup_region_open")
+                and not (s.get("region_picker") or {}).get("open"))
+
     def reconcile_region(self, s, now):
         """Shared bounded read-back controller; only the adapter selects values.
 
@@ -301,7 +313,7 @@ class Attempt:
         retry ledger must not inherit the one-shot cart-write policy.
         """
         r = s.get("region_picker")
-        if not r:
+        if not r or self.pickup_store_confirmed(s):
             return None
         if r.get("context") != self.method:
             return self.finish("attention", "地区选择用途与当前收货方式不一致；未修改地址")
@@ -528,7 +540,7 @@ class Attempt:
         # Address failures hand off before generic stall timers. Do not mutate
         # a region before the requested fulfillment method is actually selected.
         r = s.get("region_picker")
-        if self.bag_verified and r and (stage == "CONTACT" or (stage == "FULFILLMENT" and s.get(self.method + "_selected"))):
+        if self.bag_verified and r and not self.pickup_store_confirmed(s) and (stage == "CONTACT" or (stage == "FULFILLMENT" and s.get(self.method + "_selected"))):
             if r.get("reason") in ("missing", "ambiguous") or (not r.get("matched") and now-self.last_progress >= 25):
                 return self.reconcile_region(s, now) if r.get("reason") in ("missing", "ambiguous") else Decision("manual_region", "地区更新未能确认，请在 Safari 手动选择；选好后自动继续")
         # Evaluate a fresh read-back before declaring a stall. The browser call
@@ -1016,16 +1028,36 @@ class Attempt:
                 return self.finish("attention", "页面仍有校验错误")
             if stage == "CONTACT":
                 contact_keys = {f.get("key") for f in s.get("fields", []) if f.get("configured", True) and f.get("matches")}
-                self.contact_verified = {"phone", "email"}.issubset(contact_keys) and all(
+                fields_verified = all(
                     f.get("matches") for f in s["fields"] if f.get("key") and f.get("configured",True)
                     and not (s.get("region_picker") and f.get("key") in ("province", "city", "district")))
-                if not self.contact_verified:
+                self.contact_verified = {"phone", "email"}.issubset(contact_keys) and fields_verified
+                self.contact_email_deferred = (
+                    not self.contact_verified and self.method == "pickup"
+                    and s.get("contact_email_defer_allowed") is True and fields_verified
+                    and {"family_name", "given_name", "phone", "id_last4"}.issubset(contact_keys)
+                    and not any(f.get("key") == "email" for f in s["fields"])
+                    and not s.get("final_button")
+                    and sum(normal(c.get("label", "")) == normal("继续选择付款方式")
+                            and c.get("role") in ("button", "link") and not c.get("disabled")
+                            for c in s.get("controls", [])) == 1)
+                if not self.contact_verified and not self.contact_email_deferred:
                     if not s.get('fields') and not s.get('final_button'):
                         return Decision('wait','等待联系人字段加载并回读，尚未确认资料')
                     return self.finish("attention", "联系人手机号和邮箱未完整回读确认，请核对官网资料后继续")
             if stage == "CONTACT" and s.get("contact_verification_required"):
                 return self.finish("attention", "请本人完成联系人手机号码验证；验证完成后再继续，不重复加购")
             if s.get("final_button"):
+                if self.contact_email_deferred:
+                    if stage != "REVIEW":
+                        return self.finish("attention", "已见下单按钮，但还没到订单核对页，联系邮箱未核对；请本人核对，未下单")
+                    email = s.get("review_contact_email")
+                    if s.get("review_contact_email_matches") is not True and email != "none":
+                        return self.finish("attention", "已到订单核对页，但页面上的联系邮箱与保存资料不一致；请本人核对，未下单")
+                    # 联系人页和核对页都没显示邮箱：姓名、手机号、证件后四位已在联系人页核对一致，
+                    # 邮箱按官网登录的账户走，其余核对照常进行。标记不清除，提交前重新读取页面时再查一遍邮箱。
+                    self.contact_email_unshown = email == "none"
+                    self.contact_verified = True
                 for key in ("fulfillment", "contact", "payment"):
                     action = "review_edit_" + key
                     if self.sent.get(action) and not getattr(self, key + "_verified"):
@@ -1089,7 +1121,8 @@ class Attempt:
                             confirmed = dates_in(" ".join(row.get("pickup_dates", [])), allowed=expected_dates)
                             if len(confirmed) != 1 or confirmed[0] not in expected_dates:
                                 return self.finish("attention", "已到核对页，但逐件取货日期未确认或已变化；请本人核对，不自动提交")
-                    return self.finish("ready", "已到最终提交前；尚未下单／付款")
+                    return self.finish("ready", "已到最终提交前；尚未下单／付款" +
+                                       ("（官网未显示联系邮箱，按登录账户）" if self.contact_email_unshown else ""))
                 return self.finish("attention", "已见提交按钮，但订单完整性尚未全部验证")
             if stage != "REVIEW":
                 c = control(["继续", "继续填写取货详情", "继续填写送货详情", "继续填写送货地址", "继续选择付款方式", "检查订单", "查看订单", "继续检查订单"], {"button", "link"})

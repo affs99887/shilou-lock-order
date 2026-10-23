@@ -178,6 +178,54 @@ class PortabilityTests(unittest.TestCase):
         browser.response('owned',page,Mock(request=request,status=403,headers={}))
         self.assertIsNone(browser.access_failure())
 
+    def test_product_loading_blocks_commands_without_consuming_nonce(self):
+        browser=EdgeBrowser(Mock(),'')
+        browser.window='owned';page=Mock(url='https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro')
+        browser.pages['owned']=page;page.is_closed.return_value=False
+        browser.channels['owned']=Mock()
+        browser.evaluate=Mock(return_value='interactive')
+        result=browser.call({}, {}, {'kind':'click','nonce':'one'})
+        self.assertEqual(result['result'],'stale')
+        self.assertEqual(result['reason'],'product_updating')
+        browser.evaluate.assert_called_once_with('document.readyState')
+
+    def test_product_pending_update_and_failed_request(self):
+        browser=EdgeBrowser(Mock(),'');browser.window='owned'
+        page=Mock(url='https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro')
+        browser.pages['owned']=page;page.is_closed.return_value=False
+        browser.channels['owned']=Mock();browser.evaluate=Mock(return_value='complete')
+        request=Mock(url='https://www.apple.com.cn/shop/updateSummary?secret=value',resource_type='fetch')
+        browser.product_request('owned',request)
+        result=browser.call({}, {}, {'kind':'click','nonce':'one'})
+        self.assertEqual(result['result'],'stale')
+        self.assertEqual(result['diagnostics']['edge_product_pending'],1)
+        browser.request_failed('owned',request)
+        self.assertEqual(len(browser.product_requests['owned']),0)
+
+    def test_availability_denial_is_unknown_not_global_block(self):
+        browser=EdgeBrowser(Mock(),'');browser.window='owned';page=Mock()
+        request=Mock(url='https://www.apple.com.cn/shop/fulfillment-messages?secret=value',
+                     resource_type='fetch',method='GET')
+        request.is_navigation_request.return_value=False
+        browser.response('owned',page,Mock(request=request,status=541,headers={}))
+        self.assertIsNone(browser.access_failure())
+        result=browser.auxiliary_diagnostics()
+        self.assertTrue(result['edge_availability_unknown'])
+        self.assertEqual(result['edge_auxiliary_http_status'],541)
+        self.assertNotIn('secret',json.dumps(result))
+
+    def test_product_update_finishing_between_read_and_click_requires_new_readback(self):
+        browser=EdgeBrowser(Mock(),'');browser.window='owned'
+        page=Mock(url='https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro')
+        browser.pages['owned']=page;page.is_closed.return_value=False
+        browser.channels['owned']=Mock();browser.evaluate=Mock(return_value='complete')
+        browser.product_stability['owned']=('old',0)
+        request=Mock(url='https://www.apple.com.cn/shop/updateSummary',resource_type='fetch')
+        browser.product_request('owned',request);browser.product_request_done('owned',request)
+        result=browser.call({}, {}, {'kind':'click','nonce':'one','expected':'old'})
+        self.assertEqual(result['result'],'stale')
+        browser.evaluate.assert_called_once_with('document.readyState')
+
     def test_windows_regional_adapter_restricts_storefront_and_contact_payload(self):
         from regional_service import make_regional_browser
         with tempfile.TemporaryDirectory() as d, patch('regional_service.sys.platform','win32'):

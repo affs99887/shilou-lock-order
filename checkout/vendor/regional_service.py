@@ -23,7 +23,7 @@ HANDOFF_TITLES = {
     'payment': '请手动选择付款／分期方案',
     'review': '请本人核对订单并完成下单／支付',
     'contact': '请本人核对联系资料／地址',
-    'pickup': '请本人核对门店／取货时间',
+    'pickup': '取货选项需要处理',
     'applecare': '请本人核对 AppleCare 方案',
     'cart': '请本人核对购物袋',
     'product': '请本人核对商品选配',
@@ -46,14 +46,15 @@ class RegionalSafari(Safari):
     def navigate(self, url, foreground=False):
         if not allowed_url(url, self.locale, navigation=True):
             raise ValueError('只允许本地区已核验的 Apple 商店入口')
-        result = self.script(self.bound('set URL of checkoutTab to ' + json.dumps(url) + '\n' +
+        result = self.script(self.bound('try\ndo JavaScript "window.__appleCheckoutDeparting = true" in checkoutTab\nend try\nset URL of checkoutTab to ' + json.dumps(url) + '\n' +
                                        (self.presentation_script() if foreground else '')))
+        self.expected_path = urlsplit(url).path
         if result == 'LOST_TAB':
             raise RuntimeError('专属选购标签丢失；不接管其他页面')
 
     def call(self, profile, target, command=None):
         # Read-only probes (including login screens) receive no personal data.
-        payload = dict(profile={}, target=target)
+        payload = dict(profile={}, target=target, expected_path=self.expected_path)
         if command:
             payload['command'] = command
             if command.get('kind') == 'fill':
@@ -66,6 +67,8 @@ class RegionalSafari(Safari):
             value = json.loads(result)
             if not isinstance(value, dict):
                 raise ValueError()
+            if value.get('stage') not in (None, 'LOADING'):
+                self.expected_path = ''
             return value
         except (ValueError, TypeError):
             raise RuntimeError('国际选购回执无法确认；不会重复写入购物袋') from None
@@ -125,10 +128,18 @@ def decide(snapshot, plan, ledger):
     controls = [c for c in s.get('controls', []) if not c.get('disabled')]
     def one(group, predicate=lambda c: True):
         rows = [c for c in controls if c.get('group') == group and predicate(c)]
+        if group == 'checkout' and len(rows) > 1:
+            # Apple renders the same bag checkout action above and below items.
+            # Only its canonical, identically labelled controls are equivalent.
+            labels = {(c.get('label', '').strip(), c.get('value', '')) for c in rows}
+            if len(labels) == 1 and all(c.get('autom') == 'checkout' for c in rows):
+                return rows[0]
         return rows[0] if len(rows) == 1 else None
     def click(c, key):
         return dict(kind='click', ref=c['ref'], key=key)
     if stage == 'PRODUCT':
+        if ledger.get('add_sent'):
+            return dict(kind='inspect_bag')
         # Main/catalog dimensions: never translate a CN color into another SKU.
         for key in p['regional_product']['dimensions']:
             if key == 'familyType':
@@ -145,7 +156,7 @@ def decide(snapshot, plan, ledger):
         choices = {
             'trade_in': re.compile(r'no.?trade|notrade|without|不|なし|利用しない', re.I),
             'purchase': re.compile(r'full.?price|pay.?in.?full|一括|全額|全款', re.I),
-            'applecare': re.compile(r'no.?applecare|without|not.?now|不加|不需要|なし|加入しない', re.I)
+            'applecare': re.compile(r'no.?applecare|without|not.?now|不加|不需要|無\s*applecare|なし|加入しない', re.I)
         }
         if p['applecare'] != 'none':
             return dict(kind='handoff', action='applecare', reason='国际 AppleCare 价格及期限需官网核验；请本人选择，不擅自替换保障')
@@ -160,8 +171,6 @@ def decide(snapshot, plan, ledger):
         add = one('add')
         if add:
             # An add outcome must be read in the bag, never repeated.
-            if ledger.get('add_sent'):
-                return dict(kind='inspect_bag')
             if s.get('product_part') != p['part_number']:
                 return dict(kind='handoff', reason='官网当前选配 SKU 尚未核验，不添加可能错误的配置')
             return click(add, 'add')
@@ -199,36 +208,68 @@ def decide(snapshot, plan, ledger):
         return dict(kind='handoff', action=STAGE_ACTIONS[stage],
                     reason=reason + '国际版未提交订单、未付款，不代表已经锁单。')
     if stage in ('FULFILLMENT', 'CONTACT'):
+        raw_targets = [c for c in s.get('controls', []) if c.get('group') == 'store' and c.get('matches')]
+        if raw_targets and all(c.get('disabled') for c in raw_targets):
+            return dict(kind='handoff', action='pickup', reason='目标门店当前不可取货，保留原门店设置，等待该门店恢复可取')
         stores = [c for c in controls if c.get('group') == 'store']
         if stores:
             for scope in {c.get('scope', 'store') for c in stores}:
                 wanted = [c for c in stores if c.get('scope', 'store') == scope and c.get('matches')]
                 if len(wanted) != 1:
+                    disabled_target = any(c.get('group') == 'store' and c.get('matches') and c.get('disabled') for c in s.get('controls', []))
+                    more = one('more_stores')
+                    if not wanted and not disabled_target and more and not ledger.get('stores_expanded'):
+                        return click(more, 'more_stores')
                     return dict(kind='handoff', reason='目标门店不可选或无法逐项唯一匹配；不擅自送货')
                 if not wanted[0].get('selected'):
                     return click(wanted[0], 'store:' + scope)
             ledger['store_verified'] = True
+            if ledger.get('verified_store_id') != p['store_id']:
+                ledger['date_verified'] = ledger['time_verified'] = False
+                ledger.pop('pickup_date', None)
+                ledger['verified_store_id'] = p['store_id']
         elif not ledger.get('store_verified'):
             pickup = one('pickup')
             if pickup and not pickup.get('selected'):
                 return click(pickup, 'pickup')
-            return dict(kind='handoff', reason='取货门店尚未核验；请在官网选择目标门店后继续')
-        # A date must have an exact ISO value. Never guess localized/relative dates.
+            location = [f for f in s.get('fields', []) if f.get('key') == 'pickup_location' and not f.get('disabled')]
+            if len(location) == 1:
+                location = location[0]
+                city = p.get('regional_store', {}).get('address', {}).get('city')
+                if city and (not location.get('matches') or not location.get('valid')):
+                    return dict(kind='search_location', ref=location['ref'], value=city, key='pickup_location')
+                search = one('store_search')
+                if city and search:
+                    return click(search, 'store_search')
+            if stage == 'FULFILLMENT':
+                return dict(kind='wait')
+            return dict(kind='handoff', reason='当前页面没有可核验的目标取货门店，请返回取货步骤重新选择')
+        # HK uses English month labels with day-only radio values. Require the
+        # explicit month/day to agree; a bare day or relative label is not enough.
         earliest = p.get('pickup_date_policy') == 'earliest'
-        def date_key(value):
+        def date_key(choice):
             from datetime import date
+            value = choice.get('value')
             try:
                 return date.fromisoformat(value).isoformat() if date.fromisoformat(value).isoformat() == value else None
             except (ValueError, TypeError):
-                return None
+                if p.get('checkout_locale') == 'zh_HK' and str(value).isdigit():
+                    import re
+                    from pickup_monitor import dates_in
+                    label = choice.get('label', '')
+                    if re.search(r'january|february|march|april|may|june|july|august|september|october|november|december', label, re.I):
+                        dates = dates_in(label)
+                        if len(dates) == 1 and date.fromisoformat(dates[0]).day == int(value):
+                            return dates[0]
+            return None
         def ordered_choices(choices, group):
             if group == 'date':
                 if earliest:
-                    if any(not date_key(c['value']) for c in choices):
+                    if any(not date_key(c) for c in choices):
                         return []
-                    return sorted(choices, key=lambda c: c['value'])
+                    return sorted(choices, key=date_key)
                 dates = p.get('pickup_dates', [])
-                return sorted([c for c in choices if c['value'] in dates], key=lambda c: dates.index(c['value']))
+                return sorted([c for c in choices if date_key(c) in dates], key=lambda c: dates.index(date_key(c)))
             if earliest:
                 import re
                 ranked = []
@@ -247,25 +288,51 @@ def decide(snapshot, plan, ledger):
         for group in ('date', 'time'):
             rows = [c for c in controls if c.get('group') == group]
             if rows:
-                if len(rows) == 1 and rows[0].get('options'):
+                if len(rows) == 1 and (rows[0].get('input_type') == 'select' or rows[0].get('options')):
                     c = rows[0]
-                    options = ordered_choices([o for o in c['options'] if o['value'] and not o.get('disabled')], group)
+                    available = [o for o in c['options'] if o['value'] and not o.get('disabled')]
+                    if not available:
+                        return dict(kind='wait')
+                    if group == 'time' and p.get('checkout_locale') == 'zh_HK' and ledger.get('pickup_date'):
+                        import re
+                        slot = r'(\d{1,2})-\d{2}:\d{2}-\d{2}:\d{2}'
+                        if any(not re.fullmatch(slot, o['value']) for o in available):
+                            return dict(kind='handoff', reason='官网取货时段无法关联已选日期，请本人核对')
+                        day = int(ledger['pickup_date'][-2:])
+                        available = [o for o in available if int(re.fullmatch(slot, o['value'])[1]) == day]
+                        if not available:
+                            return dict(kind='wait')
+                    options = ordered_choices(available, group)
                     if not options:
                         return dict(kind='handoff', reason='取货日期或时段未匹配，请本人核对')
                     if c.get('value') not in [o['value'] for o in options] or (earliest and c.get('value') != options[0]['value']):
+                        ledger[group + '_verified'] = False
                         return dict(kind='select', ref=c['ref'], value=options[0]['value'], key=group)
                     if group == 'date':
-                        ledger['date_verified'] = True
+                        current_date = date_key(next(o for o in options if o['value'] == c['value']))
+                        if ledger.get('pickup_date') != current_date:
+                            ledger['time_verified'] = False
+                        ledger['pickup_date'] = current_date
+                    ledger[group + '_verified'] = True
                     continue
                 rows = ordered_choices(rows, group)
                 if not rows:
                     return dict(kind='handoff', reason='取货日期未匹配设置，请本人选日期后继续')
                 if not any(c.get('selected') for c in rows) or (earliest and not rows[0].get('selected')):
+                    ledger[group + '_verified'] = False
                     return click(rows[0], group)
                 if group == 'date':
-                    ledger['date_verified'] = True
+                    current_date = date_key(next(c for c in rows if c.get('selected')))
+                    if ledger.get('pickup_date') != current_date:
+                        ledger['time_verified'] = False
+                    ledger['pickup_date'] = current_date
+                ledger[group + '_verified'] = True
         if (p.get('pickup_dates') or earliest) and not ledger.get('date_verified'):
+            if stage == 'FULFILLMENT' and not any(c.get('group') == 'date' for c in s.get('controls', [])):
+                return dict(kind='wait')
             return dict(kind='handoff', reason='取货日期尚无法核验，请本人核对官网日期；不忽略已设日期范围')
+        if stage == 'FULFILLMENT' and p.get('checkout_locale') == 'zh_HK' and not ledger.get('time_verified'):
+            return dict(kind='wait')
         for f in s.get('fields', []):
             if f.get('disabled'):
                 continue
@@ -298,8 +365,11 @@ class RegionalService:
         self.browser = make_regional_browser(owner, plan['checkout_locale'])
         self.started, self.next_tick, self.changed_at = 0, 0, 0
         self.fingerprint, self.pending = None, None
+        self.pending_since = 0
+        self.bag_loading_since = None
         self.ledger = {}
         self.sent = set()
+        self.stale_receipts = {}
         self.handoff_key = self.notice_id = None
         self.submission_deadline = None
 
@@ -354,10 +424,13 @@ class RegionalService:
             self.clear_intervention(clear_notice=True)
             self.handoff_key = self.notice_id = None
             self.pending = self.fingerprint = None
+            self.pending_since = 0
+            self.bag_loading_since = None
             self.next_tick = 0
             self.started = self.changed_at = time.monotonic()
             self.ledger = dict(clearing=True, profile=normalized_regional_profile(self.preferences['checkout_locale']))
             self.sent = set()
+            self.stale_receipts = {}
             self.browser.open(self.preferences['bag_url'])
             self.active = True
             self.update(mode='running', stage='BAG', reason='核对本地区购物袋，按已授权范围清理')
@@ -377,8 +450,26 @@ class RegionalService:
         s = self.browser.call(self.ledger.get('profile', {}), self.preferences)
         if self.owner.cancel.is_set():
             return
-        if s.get('fingerprint') != self.fingerprint:
-            if s.get('fingerprint'):
+        if s.get('bag_loading'):
+            if self.bag_loading_since is None:
+                self.bag_loading_since = now
+            if now - self.bag_loading_since > 30:
+                self.attention('购物袋内容超过 30 秒仍未完整显示，已保留页面；不会重复清空或加购', 'cart')
+                return
+        else:
+            self.bag_loading_since = None
+        snapshot_changed = s.get('fingerprint') != self.fingerprint
+        if snapshot_changed:
+            departure = (s.get('stage') == 'LOADING' or
+                         self.pending in ('add', 'inspect_bag') and s.get('stage') == 'PRODUCT' or
+                         self.pending == 'checkout' and s.get('stage') == 'BAG' or
+                         bool(self.pending and self.pending.startswith('continue:') and
+                              s.get('stage') == self.pending.split(':', 1)[1]) or
+                         self.pending in self.ledger.get('profile', {}) and s.get('stage') == 'CONTACT' and
+                         not any(f.get('key') == self.pending and f.get('matches') and f.get('valid') for f in s.get('fields', [])) or
+                         self.pending == 'more_stores' and s.get('stage') == 'FULFILLMENT' and
+                         not any(c.get('group') == 'store' and c.get('matches') for c in s.get('controls', [])))
+            if s.get('fingerprint') and not departure:
                 self.pending = None
             self.fingerprint = s.get('fingerprint')
             self.changed_at = now
@@ -394,9 +485,10 @@ class RegionalService:
             self.handoff_key = None
             self.update(mode='running', reason='已离开登录步骤，重新核对官网页面')
         if self.pending:
-            if now - self.changed_at > 5:
+            if now - self.pending_since > (5 if self.pending == 'add' else 30):
                 if self.pending == 'add':
-                    self.pending = None
+                    self.pending = 'inspect_bag'
+                    self.pending_since = now
                     self.browser.navigate(self.preferences['bag_url'])
                     self.changed_at = now
                 else:
@@ -405,6 +497,8 @@ class RegionalService:
         if now - self.changed_at > 30:
             self.attention('官网超过 30 秒无可验证进展，请本人处理后继续')
             return
+        if snapshot_changed and s.get('stage') in ('BAG', 'FULFILLMENT'):
+            return  # Verify one unchanged read before bag or pickup actions.
         d = decide(s, self.preferences, self.ledger)
         kind = d['kind']
         if kind == 'wait':
@@ -419,6 +513,8 @@ class RegionalService:
             self.browser.navigate(self.preferences['product_url'])
             self.changed_at = now
         elif kind == 'inspect_bag':
+            self.pending = 'inspect_bag'
+            self.pending_since = now
             self.browser.navigate(self.preferences['bag_url'])
             self.changed_at = now
         else:
@@ -432,10 +528,26 @@ class RegionalService:
             if d['key'] == 'add':
                 self.ledger['add_sent'] = True
             self.pending = d['key']
+            self.pending_since = now
             self.sent.add(token)
             self.clear_intervention()
             self.handoff_key = None
             self.changed_at = now
             result = self.browser.call(self.ledger.get('profile', {}), self.preferences, command)
+            if result.get('result') == 'stale' and result.get('dispatched') is False:
+                # Explicit refusal before any event is different from an
+                # unknown write outcome. Re-read, with a bounded retry budget.
+                self.sent.discard(token)
+                self.pending = None
+                if d['key'] == 'add':
+                    self.ledger.pop('add_sent', None)
+                self.stale_receipts[token] = self.stale_receipts.get(token, 0) + 1
+                if self.stale_receipts[token] > 3:
+                    self.attention('官网页面持续更新，暂未执行本步操作；已保留现场，请稍后继续')
+                else:
+                    self.update(reason='官网页面正在更新，重新核对当前步骤')
+                return
             if result.get('result') != 'dispatched':
                 self.attention('官网操作未确认，已保留现场；不会重新加购或提交订单')
+            elif d['key'] == 'more_stores':
+                self.ledger['stores_expanded'] = True

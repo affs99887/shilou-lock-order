@@ -64,3 +64,55 @@ test('foreign profiles show regional contact fields without mainland identity',(
  assert.ok(!sg.some(n=>n.props['aria-label']==='证件后四位'));
  const jp=a.nodes(false,'ja_JP');assert.ok(jp.some(n=>n.props['aria-label']==='姓氏假名'));
 });
+
+test('all mainland address paths have selectable districts and preserve the chosen hierarchy',()=>{
+ const a=ui();let cities=0,localities=0,special=0;
+ const choices=label=>a.nodes().find(n=>n.props['aria-label']===label).props.children[1].map(n=>n.props.children);
+ assert.equal(choices('省份').length,31);
+ for(const p of regions){
+  a.select('省份',p.name);assert.equal(a.hooks[0].city,'');assert.equal(a.hooks[0].district,'');
+  const cs=choices('城市');assert.ok(cs.length,p.name);assert.equal(new Set(cs).size,cs.length);
+  for(const c of cs){
+   a.select('城市',c);assert.equal(a.hooks[0].district,'');cities++;
+   const ds=choices('区县');assert.ok(ds.length,`${p.name}/${c}`);assert.equal(new Set(ds).size,ds.length);
+   if(ds.length===1&&ds[0]===c)special++;
+   for(const d of ds){a.select('区县',d);localities++;assert.deepEqual([a.hooks[0].province,a.hooks[0].city,a.hooks[0].district],[p.name,c,d]);}
+  }
+ }
+ assert.equal(cities,369);assert.equal(localities,2849);assert.equal(special,36);
+});
+
+test('all special-city saved profiles restore their selectable district and save without losing it',async()=>{
+ let saved={};const a=ui(async args=>args.op==='read_profile'?saved:args.op==='status'?{busy:false,error:''}:{});
+ for(const p of regions){
+  if(['11','12','31','50'].includes(p.code))continue;
+  for(const c of p.children.filter(c=>!c.children?.length)){
+   saved={province:p.name,city:c.name,district:c.name,id_last4:'0616'};
+   a.nodes().find(n=>n.props.children==='读取已保存资料').props.onClick();await new Promise(setImmediate);
+   assert.deepEqual(a.hooks[0],saved,`${p.name}/${c.name}`);assert.doesNotMatch(a.hooks[2],/重新选取/);
+  }
+ }
+ a.nodes().find(n=>n.props.children==='保存联系资料').props.onClick();await new Promise(r=>setTimeout(r,400));
+ assert.deepEqual(a.calls.findLast(c=>c.op==='save_profile').payload.profile,saved);
+});
+
+test('changing special cities clears the previous district and invalid saved districts remain unselected',async()=>{
+ const a=ui(async()=>({province:'广东',city:'东莞',district:'江汉区'}));
+ a.select('省份','广东省');a.select('城市','东莞市');a.select('区县','东莞市');
+ a.select('城市','中山市');assert.equal(a.hooks[0].district,'');
+ const district=a.nodes().find(n=>n.props['aria-label']==='区县');
+ assert.deepEqual(district.props.children[1].map(n=>n.props.children),['中山市']);
+ a.nodes().find(n=>n.props.children==='读取已保存资料').props.onClick();await new Promise(setImmediate);
+ assert.equal(a.hooks[0].district,'');assert.match(a.hooks[2],/重新选取/);
+});
+
+test('administrative data contains unique codes, nonempty names and valid parent-child prefixes',()=>{
+ const codes=new Set();
+ function walk(node,parent){
+  assert.match(node.code,/^\d{2}(?:\d{2}){0,2}$/);assert.ok(node.name.trim());
+  assert.ok(!codes.has(node.code),node.code);codes.add(node.code);
+  if(parent)assert.ok(node.code.startsWith(parent.code),`${parent.name}/${node.name}`);
+  for(const child of node.children||[])walk(child,node);
+ }
+ for(const p of regions)walk(p);
+});

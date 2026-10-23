@@ -41,30 +41,38 @@ class CartRecoveryTests(unittest.TestCase):
     def writes(self):
         return [c.args[2] for c in self.service.browser.call.call_args_list if len(c.args) == 3]
 
+    def missing(self, now):
+        """官网显示找不到页面，再到约定时刻执行那次重开。"""
+        self.tick(dict(stage='NOT_FOUND'), now)
+        self.tick(dict(stage='LOADING'), now + (1 if self.service.missing_retries == 1 else 3))
+
     def test_missing_page_reopens_cart_once_and_confirmed_empty_starts_product(self):
         self.remove()
         self.tick(dict(stage='NOT_FOUND'), 16)
-        self.service.browser.navigate.assert_called_once_with('https://www.apple.com.cn/shop/bag')
+        browser = self.service.browser
+        browser.reopen_failed_entry.assert_not_called()  # 先等 1 秒
         self.assertTrue(self.service.active)
         self.assertIsNone(self.bridge.notice)
         self.assertIsNone(self.service.status.get('intervention'))
-        self.assertEqual(self.service.pending_remove, (1, 11, True))
         self.tick(dict(stage='LOADING'), 17)
+        browser.reopen_failed_entry.assert_called_once_with('https://www.apple.com.cn/shop/bag')
+        self.assertEqual(self.service.pending_remove, (1, 11, False))
+        self.tick(dict(stage='LOADING'), 18)
         self.assertIsNone(self.service.attempt)
-        self.tick(dict(stage='BAG', empty_bag=True, items=[]), 18)
+        self.tick(dict(stage='BAG', empty_bag=True, items=[]), 19)
         self.assertEqual(self.service.phase, 'RUN')
-        self.assertEqual(self.service.browser.navigate.call_args_list, [
-            call('https://www.apple.com.cn/shop/bag'),
+        self.assertEqual(browser.navigate.call_args_list, [
             call(core.CATALOG['iphone-18-pro']['url'], foreground=True)])
         self.assertEqual([c['kind'] for c in self.writes()], ['remove'])
         trace = json.loads((Path(self.temp.name) / 'checkout-diagnostics.json').read_text())['events']
         self.assertEqual([e['http_status'] for e in trace if e['stage'] == 'NOT_FOUND'], [0])
-        self.assertEqual(sum(e['action'] == 'bag_recheck' for e in trace), 1)
+        self.assertEqual(sum(e['action'] == 'page_reopen' for e in trace), 1)
 
     def test_unchanged_cart_never_repeats_remove_and_keeps_original_deadline(self):
         self.remove()
-        self.tick(dict(stage='NOT_FOUND'), 16)
-        for now in (17, 25, 39):
+        self.missing(16)
+        # 重开后购物袋没变：超过 5 秒再读一次核实，删除本身不重复；期限仍从原来算起。
+        for now in (25, 39):
             self.tick(self.bag, now)
         self.assertTrue(self.service.active)
         self.tick(self.bag, 41)
@@ -72,33 +80,36 @@ class CartRecoveryTests(unittest.TestCase):
         self.assertIn('30 秒', self.service.status['reason'])
         self.assertIsNone(self.service.attempt)
         self.assertEqual(len(self.writes()), 1)
+        self.service.browser.reopen_failed_entry.assert_called_once()
         self.service.browser.navigate.assert_called_once_with('https://www.apple.com.cn/shop/bag')
 
-    def test_repeated_missing_page_stops_and_notifies(self):
+    def test_repeated_missing_page_reopens_twice_then_ends_without_writes(self):
         self.remove()
-        self.tick(dict(stage='NOT_FOUND'), 16)
-        self.tick(dict(stage='NOT_FOUND'), 17)
+        self.missing(16)
+        self.missing(18)
+        self.assertTrue(self.service.active)
+        self.tick(dict(stage='NOT_FOUND'), 22)
         self.assertFalse(self.service.active)
-        self.assertEqual(self.bridge.notice['kind'], 'not_found')
-        self.assertEqual(self.service.browser.navigate.call_count, 1)
+        self.assertTrue(self.bridge.retryable_end, '打不开不需要本人处理：单次选购自己结束，自动选购等下一次有货')
+        self.assertEqual(self.bridge.end_reason, '官网页面重开 2 次后仍打不开')
+        self.assertEqual(self.service.browser.reopen_failed_entry.call_count, 2)
+        self.service.browser.navigate.assert_not_called()
         self.assertEqual(len(self.writes()), 1)
 
-    def test_resumed_recheck_clears_old_pause_banner_and_reports_a_new_failure(self):
+    def test_reopen_clears_old_pause_banner(self):
         self.remove()
         self.service.require_user_action('not_found')
-        old_notice = self.bridge.notice['id']
         self.tick(dict(stage='NOT_FOUND'), 16)
         self.assertIsNone(self.service.status.get('intervention'))
-        self.tick(dict(stage='NOT_FOUND'), 17)
-        self.assertEqual(self.bridge.notice['kind'], 'not_found')
-        self.assertNotEqual(self.bridge.notice['id'], old_notice)
+        self.assertEqual(self.service.status['mode'], 'recovering')
 
-    def test_delayed_response_and_missing_page_share_one_recheck(self):
+    def test_delayed_response_recheck_does_not_use_up_page_reopens(self):
         self.remove()
         self.tick(self.bag, 17)
-        self.tick(dict(stage='NOT_FOUND'), 18)
-        self.assertFalse(self.service.active)
-        self.assertEqual(self.bridge.notice['kind'], 'not_found')
+        self.service.browser.navigate.assert_called_once_with('https://www.apple.com.cn/shop/bag')
+        self.missing(18)
+        self.assertTrue(self.service.active)
+        self.service.browser.reopen_failed_entry.assert_called_once_with('https://www.apple.com.cn/shop/bag')
         self.assertEqual(self.service.browser.navigate.call_count, 1)
         self.assertEqual(len(self.writes()), 1)
 
@@ -109,38 +120,41 @@ class CartRecoveryTests(unittest.TestCase):
         self.assertEqual(self.bridge.notice['kind'], 'not_found')
         self.service.browser.navigate.assert_not_called()
 
-    def test_missing_entry_without_pending_remove_is_not_retried(self):
+    def test_missing_entry_without_pending_remove_reopens_without_writes(self):
         self.tick(dict(stage='NOT_FOUND'), 11)
-        self.assertFalse(self.service.active)
-        self.assertEqual(self.bridge.notice['kind'], 'not_found')
+        self.assertTrue(self.service.active)
+        self.assertIsNone(self.bridge.notice)
+        self.tick(dict(stage='LOADING'), 12)
+        self.service.browser.reopen_failed_entry.assert_called_once_with('https://www.apple.com.cn/shop/bag')
         self.service.browser.navigate.assert_not_called()
         self.assertEqual(self.writes(), [])
 
-    def test_unrecognized_cart_is_not_treated_as_empty_after_recheck(self):
+    def test_unrecognized_cart_is_not_treated_as_empty_after_reopen(self):
         self.remove()
-        self.tick(dict(stage='NOT_FOUND'), 16)
-        self.tick(dict(stage='BAG', items=[]), 17)
+        self.missing(16)
+        self.tick(dict(stage='BAG', items=[]), 18)
         self.assertIsNone(self.service.attempt)
         self.tick(dict(stage='BAG', items=[]), 41)
         self.assertFalse(self.service.active)
-        self.assertEqual(self.service.browser.navigate.call_count, 1)
+        self.service.browser.reopen_failed_entry.assert_called_once()
+        self.service.browser.navigate.assert_not_called()
 
     def test_busy_or_invalid_empty_cart_does_not_start_product(self):
         self.remove()
-        self.tick(dict(stage='NOT_FOUND'), 16)
-        self.tick(dict(stage='BAG', empty_bag=True, items=[], bag_busy=True), 17)
+        self.missing(16)
+        self.tick(dict(stage='BAG', empty_bag=True, items=[], bag_busy=True), 18)
         self.assertIsNone(self.service.attempt)
-        self.tick(dict(stage='BAG', empty_bag=True, items=[], errors=['invalid']), 18)
+        self.tick(dict(stage='BAG', empty_bag=True, items=[], errors=['invalid']), 19)
         self.assertFalse(self.service.active)
         self.assertIsNone(self.service.attempt)
-        self.assertEqual(self.service.browser.navigate.call_count, 1)
+        self.service.browser.navigate.assert_not_called()
 
     def test_remaining_row_is_removed_only_after_count_decreases(self):
         self.bag['items'].append(dict(title='另一商品', quantity=1, remove_ref='other-row'))
         self.remove()
-        self.tick(dict(stage='NOT_FOUND'), 16)
+        self.missing(16)
         remaining = dict(stage='BAG', fingerprint='remaining', items=self.bag['items'][1:])
-        self.tick(remaining, 17, dict(result='dispatched'))
+        self.tick(remaining, 18, dict(result='dispatched'))
         self.assertEqual([c['ref'] for c in self.writes()], ['old-row', 'other-row'])
         self.assertIsNone(self.service.attempt)
 
@@ -178,14 +192,28 @@ class CartRecoveryTests(unittest.TestCase):
         self.assertEqual(self.bridge.notice['kind'], 'order_unknown')
         self.service.browser.navigate.assert_not_called()
 
-    def test_navigation_exception_does_not_restore_recheck_allowance(self):
+    def test_failed_reopen_still_uses_up_its_allowance(self):
         self.remove()
-        self.service.browser.navigate.side_effect = RuntimeError('navigation not confirmed')
-        with self.assertRaisesRegex(RuntimeError, 'navigation not confirmed'):
-            self.tick(dict(stage='NOT_FOUND'), 16)
+        self.service.browser.reopen_failed_entry.side_effect = RuntimeError('navigation not confirmed')
+        for now in (16, 18):
+            self.tick(dict(stage='NOT_FOUND'), now)
+            with self.assertRaisesRegex(RuntimeError, 'navigation not confirmed'):
+                self.tick(dict(stage='NOT_FOUND'), now + (1 if now == 16 else 3))
+        self.tick(dict(stage='NOT_FOUND'), 22)
+        self.assertFalse(self.service.active)
+        self.assertEqual(self.service.browser.reopen_failed_entry.call_count, 2)
+        self.service.browser.navigate.assert_not_called()
+        self.assertEqual(len(self.writes()), 1)
+
+    def test_browser_without_reopen_keeps_the_single_recheck(self):
+        # 没有重开能力的浏览器（如测试替身）仍按原规则：删除后官网 404 先重新读一次购物袋。
+        self.service.browser = Mock(spec=['call', 'navigate', 'open', 'window'])
+        self.remove()
+        self.tick(dict(stage='NOT_FOUND'), 16)
+        self.service.browser.navigate.assert_called_once_with('https://www.apple.com.cn/shop/bag')
         self.tick(dict(stage='NOT_FOUND'), 17)
         self.assertFalse(self.service.active)
-        self.assertEqual(self.service.browser.navigate.call_count, 1)
+        self.assertEqual(self.bridge.notice['kind'], 'not_found')
         self.assertEqual(len(self.writes()), 1)
 
 
