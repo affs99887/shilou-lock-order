@@ -15,7 +15,10 @@ function ui(overrides={}, targets=[{locale:"zh_CN",storeNumber:"R575",partNumber
   if(s.startsWith('@/components/'))return new Proxy({},{get:(_,n)=>String(n)});
  }).AutoCheckout;
  function nodes(){cursor=0;const found=[];function walk(e){if(!e||typeof e!=='object')return;if(e.type)found.push(e);for(const c of [e.props?.children??e].flat())if(c!==e)walk(c);}walk(Component({targets,...props}));return found;}
- return {hooks,calls,dirty,nodes,button:text=>nodes().find(n=>n.props.children===text)};
+ // 带上「是否被隐藏」：自身或任一上层 hidden，或者在没打开的配置弹窗里。
+ // 弹窗底栏（footer）里的按钮也算在弹窗里。
+ function shown(){cursor=0;const found=[];function walk(e,hidden){if(!e||typeof e!=='object')return;if(Array.isArray(e)){for(const c of e)walk(c,hidden);return;}const h=hidden||e.props?.hidden===true||(e.type==='ConfigModal'&&!e.props.open);if(e.type)found.push({node:e,hidden:h});walk(e.props?.children,h);if(e.type==='ConfigModal')walk(e.props.footer,h);}walk(Component({targets,...props}),false);return found;}
+ return {hooks,calls,dirty,nodes,shown,button:text=>nodes().find(n=>n.props.children===text)};
 }
 test('provider cards use individual term lists and one click writes both fields',()=>{
  const a=ui();const cards=a.nodes().filter(n=>n.type==='div'&&presets.some(p=>p.provider===n.key));
@@ -88,7 +91,30 @@ test('armed checkout explains why activation and editing are locked',()=>{
  assert.equal(a.button('已启用，等待有货').props.disabled,true);
  assert.match(a.nodes().find(n=>n.props['data-testid']==='checkout-disabled-reason').props.children,/先停止选购/);
 });
-test('folded plan keeps the stop control available for armed, active and stopping checkout',()=>{
+test('main actions stay on the panel while plan details live in a closed modal',()=>{
+ const a=ui({},undefined,{expanded:false});
+ const state=label=>a.shown().find(x=>x.node.props.children===label||x.node.props['aria-label']===label);
+ for(const label of ['选购目标','启用有货自动选购','手动开始选购','测试演练','人工处理后继续','登录 Apple 账户'])
+  assert.equal(state(label)?.hidden,false,label+' 要一直显示在面板上');
+ assert.equal(state('保存设置').hidden,true,'详细方案在没打开的弹窗里');
+ assert.equal(a.shown().find(x=>x.node.type==='ConfigModal').node.props.open,false);
+ const open=ui({},undefined,{expanded:true});
+ assert.equal(open.shown().find(x=>x.node.type==='ConfigModal').node.props.open,true);
+ assert.equal(open.shown().find(x=>x.node.props.children==='保存设置').hidden,false);
+});
+test('opening and closing the plan modal goes through the page toggle',()=>{
+ let toggles=0;
+ const a=ui({},undefined,{expanded:false,onSettings:()=>toggles++});
+ const modal=()=>a.shown().find(x=>x.node.type==='ConfigModal').node.props;
+ modal().onClose();
+ assert.equal(toggles,0,'已经关着时再关不应切换成打开');
+ a.nodes().find(n=>n.props?.['aria-controls']==='purchase-plan').props.onClick();
+ assert.equal(toggles,1);
+ const shownOpen=ui({},undefined,{expanded:true,onSettings:()=>toggles++});
+ shownOpen.shown().find(x=>x.node.type==='ConfigModal').node.props.onClose();
+ assert.equal(toggles,2);
+});
+test('closed plan modal keeps the stop control available for armed, active and stopping checkout',()=>{
  const a=ui({},undefined,{expanded:false});
  assert.equal(a.button('停止选购').props.hidden,true);
  for(const state of ['armed','busy','stopping']){

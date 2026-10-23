@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   AlertTriangle,
   ChevronDown,
@@ -18,6 +18,7 @@ import {
 import { Combobox } from "@/components/Combobox";
 import { BarkSettings } from "@/components/BarkSettings";
 import { AutoCheckout } from "@/components/AutoCheckout";
+import { ConfigModal } from "@/components/ConfigModal";
 import { useInventoryPurchase } from "@/lib/inventory-purchase";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { MultiCombobox } from "@/components/MultiCombobox";
@@ -184,10 +185,6 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
-  const settingsRef = useRef<HTMLElement>(null);
-  useEffect(() => {
-    if (settingsOpen) settingsRef.current?.scrollIntoView({ block: "start" });
-  }, [settingsOpen]);
   const storeOptions = useMemo(
     () => ui.stores.map((s) => ({ value: s.number, label: s.title })),
     [ui.stores],
@@ -307,7 +304,7 @@ export default function App() {
           <div className="brand"><span className="brand-symbol"><Radar size={23} /></span><div><h1>拾漏锁单</h1><p>Apple 门店库存监控</p></div></div>
           <div className="toolbar-actions">
             <div className="toolbar-run-state"><RunState running={ui.running} /></div>
-            <Button variant="ghost" aria-expanded={settingsOpen} aria-controls="notification-settings" onClick={() => setSettingsOpen(!settingsOpen)}>
+            <Button variant="ghost" aria-haspopup="dialog" aria-expanded={settingsOpen} aria-controls="notification-settings" onClick={() => setSettingsOpen(!settingsOpen)}>
               <SlidersHorizontal /> 手机提醒
             </Button>
             {ui.running ? (
@@ -548,12 +545,11 @@ export default function App() {
           </div>
         </div>
         <AutoCheckout targets={targets} expanded={planOpen} onSettings={() => setPlanOpen(!planOpen)} />
-        <section id="notification-settings" ref={settingsRef} hidden={!settingsOpen} className="notification-settings" aria-label="手机提醒设置">
-          <div className="settings-heading"><div><h2>手机提醒</h2><p>保存后生效，收起面板会保留未保存的输入。</p></div><Button variant="ghost" size="sm" onClick={() => setSettingsOpen(false)}><ChevronUp /> 收起设置</Button></div>
+        <ConfigModal id="notification-settings" narrow open={settingsOpen} title="手机提醒" description="保存后生效；关闭窗口会保留未保存的输入。" closeLabel="关闭手机提醒" onClose={() => setSettingsOpen(false)}>
           <div data-testid="settings-page" className="settings-grid">
             <BarkSettings saved={ui.settings.barkUrl || ""} />
           </div>
-        </section>
+        </ConfigModal>
         <footer className="app-footer"><span>拾漏锁单</span><span>独立选购工具 · 非 Apple 官方</span></footer>
         </main>
       </div>

@@ -28,8 +28,8 @@ export function BarkSettings({ saved }: { saved: string }) {
     } catch { setMessage(""); setError(test ? "保存或测试失败，请核对链接与网络后重试。" : "保存失败，请重试。"); }
     finally { inFlight.current = false; setBusy(false); }
   }
-  return <section className="checkout-panel rounded-xl border bg-card p-6">
-    <h2 className="text-lg font-semibold">手机提醒</h2>
+  // 放在「手机提醒」弹窗里，标题和外框由弹窗提供。
+  return <section className="bark-settings">
     <p className="section-note">从 Bark App 复制链接，直接粘贴到这里即可。</p>
     <label htmlFor="bark-address" className="mb-2 block text-sm font-medium">Bark 链接地址</label>
     <Input id="bark-address" type="password" autoComplete="off" spellCheck={false} className="select-text" disabled={busy} value={draft ?? saved} placeholder="https://api.day.app/你的设备密钥/推送内容" onChange={e => { setDraft(e.target.value); setMessage(""); setError(""); }} />

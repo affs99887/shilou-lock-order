@@ -120,7 +120,7 @@
 
 [hidden] { display: none !important; }
 
-/* The monitor stays in one workspace; secondary controls expand in place. */
+/* 监控在同一个页面完成；手机提醒和选购方案在弹窗里设置。 */
 .app-shell { max-width: 1680px; margin-inline: auto; padding-inline: 30px; }
 .app-toolbar { min-height: 78px; display: flex; justify-content: space-between; align-items: center; gap: 24px; border-bottom: 1px solid var(--border); }
 .brand { display: flex; gap: 12px; align-items: center; flex-shrink: 0; }
@@ -191,10 +191,48 @@
 .panel-toggle { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--link); padding: 5px 0 5px 8px; }
 .checkout-status-grid { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 12px; }
 .checkout-status-grid > div { display: flex; align-items: baseline; gap: 7px; }
-.checkout-status-grid span { font-size: 10px; color: var(--muted-foreground); }
-.checkout-status-grid strong { font-size: 11px; font-weight: 500; }
-.checkout-expanded .checkout-status-grid { padding-block: 14px; border-block: 1px solid var(--border); margin-block: 16px; }
-.checkout-actions { margin-top: 14px; margin-bottom: 12px; }
+.checkout-status-grid span { font-size: 11px; color: var(--muted-foreground); }
+.checkout-status-grid strong { font-size: 12px; font-weight: 500; }
+/* 自动选购状态前的圆点：灰＝未启用，蓝＝已启用或执行中，琥珀＝需要本人处理，绿＝已到核对页或待支付。 */
+.checkout-status-grid [data-tone] strong { display: inline-flex; align-items: center; gap: 6px; }
+.checkout-status-grid [data-tone] strong::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted-foreground); opacity: .55; }
+.checkout-status-grid [data-tone="armed"] strong::before, .checkout-status-grid [data-tone="busy"] strong::before { background: var(--link); opacity: 1; }
+.checkout-status-grid [data-tone="attention"] strong::before { background: #d97706; opacity: 1; }
+.checkout-status-grid [data-tone="ready"] strong::before { background: var(--in-stock); opacity: 1; }
+.checkout-rule { margin-top: 8px; font-size: 11px; color: var(--muted-foreground); }
+.checkout-rule strong { font-weight: 500; color: var(--foreground); }
+.checkout-main { display: grid; gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.checkout-target { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 12px; color: var(--muted-foreground); }
+.checkout-target select { min-width: 0; width: min(420px, 100%); height: 34px; padding-inline: 10px; font-size: 13px; border-color: var(--input); border-radius: 8px; }
+/* 操作分三组：开始选购、选购过程、账号。组之间用细竖线隔开，主操作只有「启用有货自动选购」一个实心按钮。 */
+.checkout-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.action-group + .action-group { padding-left: 16px; border-left: 1px solid var(--border); }
+.checkout-actions .manual-start { background: var(--link-muted); color: var(--link); border-color: color-mix(in srgb, var(--link) 22%, transparent); }
+.checkout-actions .manual-start:hover:enabled { background: color-mix(in srgb, var(--link) 15%, var(--card)); color: var(--link); }
+.checkout-actions .stop-checkout { color: var(--destructive); border-color: color-mix(in srgb, var(--destructive) 35%, transparent); }
+.checkout-actions .action-login { margin-left: auto; color: var(--link); }
+.checkout-note { margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--muted-foreground); }
+
+/* 配置弹窗：盖住页面居中显示，标题和底栏固定，只有中间内容滚动。 */
+.config-modal { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px 16px; }
+.config-modal-backdrop { position: absolute; inset: 0; background: rgb(0 0 0 / 40%); }
+.config-modal-panel { position: relative; display: flex; flex-direction: column; width: min(820px, 100%); max-height: calc(100dvh - 48px); overflow: hidden; background: var(--card); color: var(--card-foreground); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 24px 64px #0000002e; outline: none; }
+.config-modal-panel.is-narrow { width: min(520px, 100%); }
+.config-modal:not([hidden]) .config-modal-backdrop { animation: modal-fade .16s ease-out; }
+.config-modal:not([hidden]) .config-modal-panel { animation: modal-rise .16s ease-out; }
+@keyframes modal-fade { from { opacity: 0; } }
+@keyframes modal-rise { from { opacity: 0; transform: translateY(6px) scale(.985); } }
+.config-modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 22px 16px; border-bottom: 1px solid var(--border); }
+.config-modal-header h2 { font-size: 17px; font-weight: 650; letter-spacing: -.3px; }
+.config-modal-header p { font-size: 12px; color: var(--muted-foreground); margin-top: 4px; }
+.config-modal-close { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px; margin: -5px -10px 0 0; border-radius: 8px; color: var(--muted-foreground); }
+.config-modal-close:hover { color: var(--foreground); background: var(--muted); }
+.config-modal-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 18px 22px 22px; }
+.config-modal-body > .section-note:first-child, .bark-settings > .section-note:first-child { margin-top: 0; }
+.config-modal-body .plan-fields > h3 { padding-top: 18px; border-top: 1px solid var(--border); }
+.settings-grid > .bark-settings { padding: 0; }
+.config-modal-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 22px; border-top: 1px solid var(--border); background: var(--card); }
 .section-note { font-size: 12px; line-height: 1.7; color: var(--muted-foreground); margin-block: 10px; }
 .plan-fields h3 { font-weight: 650; font-size: 15px; }
 .plan-controls > label { flex: 1; min-width: 140px; display: grid; gap: 8px; color: var(--foreground); font-size: 12px; }
@@ -202,10 +240,6 @@
 .plan-fields input[type="checkbox"] { min-height: 0; width: 18px; height: 18px; accent-color: #0066cc; flex-shrink: 0; }
 .submission-choice { padding: 18px; border: 1px solid var(--choice-border); background: var(--choice-background); border-radius: 12px; }
 .submission-choice small { display: block; color: var(--muted-foreground); margin-top: 5px; }
-.notification-settings { scroll-margin-top: 22px; }
-.settings-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-.settings-heading h2 { font-size: 17px; font-weight: 650; }
-.settings-heading p { font-size: 11px; color: var(--muted-foreground); margin-top: 5px; }
 .settings-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: start; }
 .settings-grid > section { min-width: 0; padding: 22px; border-radius: 14px; }
 .monitor-workspace { align-items: stretch; }
@@ -237,6 +271,11 @@ button:focus-visible, select:focus-visible { outline: 3px solid #007aff88; outli
   .target-actions { max-width: 320px; }
   .target-tip { display: none; }
   .settings-grid { grid-template-columns: minmax(0, 1fr); }
+  /* 窄屏时按钮组上下排，竖线和靠右都去掉，免得换行后线条悬空。 */
+  .action-group + .action-group { padding-left: 0; border-left: 0; }
+  .checkout-actions .action-login { margin-left: 0; }
+  .config-modal { padding: 12px; }
+  .config-modal-panel { max-height: calc(100dvh - 24px); }
 }
 @media (max-width: 520px) {
   .target-fields { grid-template-columns: minmax(0, 1fr); }

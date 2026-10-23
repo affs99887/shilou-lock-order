@@ -206,17 +206,20 @@ test("inventory omits check times while query logs keep their timestamps and rec
   assert.equal(app.all(e => e.type === "AutoCheckout").length, 1);
 });
 
-test("folding secondary settings preserves drafts and keeps targets beside inventory", () => {
+test("secondary settings open in modals that keep drafts and keep targets beside inventory", () => {
   const app = renderApp();
   const settings = () => app.control(e => e.props?.["aria-controls"] === "notification-settings");
   const checkout = () => app.control(e => e.type === "AutoCheckout");
   assert.notEqual(app.control(e => e.props?.["data-testid"] === "inventory-page").hidden, true);
   assert.notEqual(app.control(e => e.props?.["data-testid"] === "target-page").hidden, true);
   app.choice("选择自提门店").onChange(["R575"]);
+  assert.equal(settings()["aria-haspopup"], "dialog");
   settings().onClick();
-  assert.equal(app.control(e => e.props?.id === "notification-settings").hidden, false);
-  settings().onClick();
-  assert.equal(app.control(e => e.props?.id === "notification-settings").hidden, true);
+  assert.equal(app.control(e => e.props?.id === "notification-settings").open, true);
+  // 关闭弹窗只是隐藏，推送设置仍在页面里，没保存的输入不会丢。
+  app.control(e => e.props?.id === "notification-settings").onClose();
+  assert.equal(app.control(e => e.props?.id === "notification-settings").open, false);
+  assert.equal(app.all(e => e.type === "BarkSettings").length, 1);
   assert.deepEqual(app.choice("选择自提门店").values, ["R575"]);
   checkout().onSettings();
   assert.equal(checkout().expanded, true);
