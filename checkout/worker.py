@@ -761,7 +761,7 @@ class Bridge:
                                 self.submission_confirmed = data.get('confirmSubmission') is True
                                 self.profile_required = False
                                 self.armed = True
-                                self.service.update(reason='等待新库存；请开启上方库存监控')
+                                self.service.update(reason='等待新库存；库存监测已随启用一起开始，有货后自动选购')
                             self.activation_pending = False
                             self.reserved = False
                     elif op in ('start', 'rehearse', 'purchase', 'manual'):

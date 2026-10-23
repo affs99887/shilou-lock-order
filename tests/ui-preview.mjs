@@ -109,14 +109,12 @@ await page.emulateMedia({colorScheme:'light'});
 await page.getByRole('checkbox',{name:'自动下单，等待本人支付',exact:false}).check();
 await page.getByRole('button',{name:'关闭选购方案',exact:true}).click();
 page.on('dialog',()=>{throw Error('native confirmation must not be used');});
+// 一次点击直接启用：不弹二次确认，带上下单授权，并且接着开始库存监测。
 await page.getByRole('button',{name:'启用有货自动选购',exact:true}).click();
-await page.getByRole('dialog').waitFor();
-await page.getByRole('button',{name:'取消',exact:true}).click();
-assert.equal(await page.evaluate(()=>window.__UI_CALLS__.filter(c=>c.cmd==='checkout_command'&&c.args.op==='arm').length),0);
-await page.getByRole('button',{name:'启用有货自动选购',exact:true}).click();
-await page.getByRole('button',{name:'确认启用并授权下单',exact:true}).click();
-await page.getByRole('dialog').waitFor({state:'hidden'});
+await page.waitForFunction(()=>window.__UI_CALLS__.some(c=>c.cmd==='start_watching'));
+assert.equal(await page.getByRole('dialog').count(),0,'arming opens no confirmation dialog');
 assert.equal(await page.evaluate(()=>window.__UI_CALLS__.filter(c=>c.cmd==='checkout_command'&&c.args.op==='arm'&&c.args.payload.confirmSubmission===true).length),1);
+assert.ok(await page.evaluate(()=>{const calls=window.__UI_CALLS__.map(c=>c.cmd==='checkout_command'?c.args.op:c.cmd);return calls.indexOf('arm')<calls.indexOf('start_watching');}),'monitoring starts after arming');
 await page.evaluate(()=>window.__EMIT__('checkout://status',{...window.__CHECKOUT_STATUS__,armed:true,reason:'已启用，等待命中'}));
 await page.getByRole('button',{name:'停止选购',exact:true}).waitFor();
 assert.equal(await page.getByRole('button',{name:'停止选购',exact:true}).isVisible(),true,'stop stays on the page while the plan modal is closed');
@@ -137,5 +135,5 @@ await page.getByText('从一个心仪的型号开始').waitFor();
 assert.equal(await page.getByRole('button',{name:'开始监测',exact:true}).isEnabled(),false);
 await screenshot(page,'empty.png',{fullPage:true});
 assert.deepEqual(errors,[]);
-console.log('UI preview passed: one-screen layout with checkout on top and logs docked at the bottom, both themes, 1280/1000 widths, target/Bark/contact/plan draft retention in modals, main actions and stop always on the page, confirmation cancel/accept. Mocked IPC only; external requests blocked.');
+console.log('UI preview passed: one-screen layout with checkout on top and logs docked at the bottom, both themes, 1280/1000 widths, target/Bark/contact/plan draft retention in modals, main actions and stop always on the page, one-click arming that also starts monitoring. Mocked IPC only; external requests blocked.');
 }finally{await browser.close();server.close();}

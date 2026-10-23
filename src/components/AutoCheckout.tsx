@@ -31,7 +31,8 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
   const [pending, setPending] = useState(false);
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState("");
-  const [confirmation, setConfirmation] = useState<"arm" | "manual" | "acknowledge_order" | null>(null);
+  // 只有「已核对订单」还要弹窗确认；启用自动选购和手动开始都直接开始。
+  const [confirmation, setConfirmation] = useState<"acknowledge_order" | null>(null);
   const dirty = useRef(false);
   const showPlan = expanded ?? open;
   const locked = pending || !!status?.busy || !!status?.armed || !!status?.stopping;
@@ -59,8 +60,8 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
     setPlan(p => p ? { ...p, ...patch } : p);
   }
   async function command(op: string, confirmed = false) {
-    if (!confirmed && (((op === "arm" || op === "manual") && plan?.auto_submit_order) || op === "acknowledge_order")) {
-      setConfirmation(op as "arm" | "manual" | "acknowledge_order");
+    if (!confirmed && op === "acknowledge_order") {
+      setConfirmation(op);
       return;
     }
     setConfirmation(null);
@@ -76,12 +77,18 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
         dirty.current = false;
       }
       const chosen = selected || (localTargets[0] && targetKey(localTargets[0]));
+      // 方案里勾了「自动下单」，点按钮就等于授权，不再另弹窗确认。
       const payload = op === "rehearse" ? { targetKey: chosen }
-        : op === "manual" ? { targetKey: chosen, confirmSubmission: confirmed && !!plan?.auto_submit_order }
+        : op === "manual" ? { targetKey: chosen, confirmSubmission: !!plan?.auto_submit_order }
         : { confirmSubmission: op === "arm" && !!plan?.auto_submit_order, confirmed:op === "acknowledge_order" };
       const result = await invoke<Status>("checkout_command", { op, payload: op === "configure" ? { plan } : payload });
       setStatus(result);
       if (op === "import") { dirty.current = false; setPlan(result.plan); }
+      if (op === "arm") {
+        // 启用有货自动选购时一并开始库存监测；已经在监测就保持原样。启用失败会在上面抛错，走不到这里。
+        try { await invoke("start_watching"); }
+        catch (e) { setError(`已启用自动选购，但库存监测没能开始：${String(e)}`); }
+      }
     } catch (e) { setError(String(e)); }
     finally { setPending(false); }
   }
@@ -128,12 +135,12 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
     <Dialog open={confirmation !== null} onOpenChange={value => { if (!value) setConfirmation(null); }}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{confirmation === "arm" ? "确认启用自动下单" : confirmation === "manual" ? "确认手动开始并自动下单" : "确认已核对 Apple 订单"}</DialogTitle>
-          <DialogDescription>{confirmation === "arm" ? "正式选购将按已保存的配置、总预算和付款方案，自动点击 Apple 的「立即下单」并接受该订单的商店条款，创建真实订单。付款、授信和签约仍由你本人完成。测试演练永不提交。" : confirmation === "manual" ? "将不等监控，按所选目标的型号直接开始选购；指定门店不能取货时改选同城能取货的门店。到订单核对页后自动点击「立即下单」创建真实订单。付款、授信和签约仍由你本人完成。" : "请先在 Apple 官网查看订单，确认上次下单结果，并确定不会重复购买。完成核对后才能开始新的选购。"}</DialogDescription>
+          <DialogTitle>确认已核对 Apple 订单</DialogTitle>
+          <DialogDescription>请先在 Apple 官网查看订单，确认上次下单结果，并确定不会重复购买。完成核对后才能开始新的选购。</DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" onClick={() => setConfirmation(null)}>取消</Button>
-          <Button disabled={confirmation === "manual" ? pending || !!status?.busy || !!status?.stopping : locked} onClick={() => { if (confirmation) void command(confirmation, true); }}>{confirmation === "arm" ? "确认启用并授权下单" : confirmation === "manual" ? "确认开始并授权下单" : "已核对，允许新选购"}</Button>
+          <Button disabled={locked} onClick={() => { if (confirmation) void command(confirmation, true); }}>已核对，允许新选购</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -142,7 +149,7 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
     {status?.orderNeedsReview && <div className="mt-2 rounded border border-amber-500 p-2">已有下单记录。先在 Apple 核对订单，停止选购后才能清除此保护。<Button variant="outline" size="sm" disabled={locked} onClick={() => void command("acknowledge_order")}>已核对订单，允许新选购</Button></div>}
     <ConfigModal id="purchase-plan" open={showPlan} title="选购方案设置" description="改完点底部「保存设置」；关闭窗口会保留未保存的输入。" closeLabel="关闭选购方案" onClose={closePlan}
       footer={plan && <><Button variant="ghost" size="sm" disabled={locked} onClick={() => void command("import")}>导入原抢先购方案</Button><Button size="sm" disabled={locked} onClick={() => void command("configure")}>保存设置</Button></>}>
-    <p className="section-note">测试演练无需开启监测或提前加购；按所选目标在官网验证，始终停在提交前。正式选购先开启监测，再启用自动选购。监控出问题时可点「手动开始选购」：不等监控，按所选目标的型号直接开始；指定门店不能取货时改选同城能取货的门店，是否自动下单按方案设置。</p>
+    <p className="section-note">测试演练无需开启监测或提前加购；按所选目标在官网验证，始终停在提交前。点「启用有货自动选购」会同时开始库存监测，有货后自动选购。监控出问题时可点「手动开始选购」：不等监控，按所选目标的型号直接开始；指定门店不能取货时改选同城能取货的门店，是否自动下单按方案设置。</p>
     {plan && <div className="plan-fields grid gap-5">
       <label className="font-semibold">选购国家／地区<select aria-label="选购国家／地区" className="block rounded border bg-background text-foreground p-2 mt-2" disabled={locked} value={locale} onChange={e=>{setSelected('');edit({checkout_locale:e.target.value,max_price:0,auto_submit_order:false,financing:e.target.value==='zh_CN'?'full':'manual',payment:e.target.value==='zh_CN'?'支付宝':'官网手动选择',installment_option:'',installment_months:0});}}>{checkoutRegions.map(r=><option key={r.locale} value={r.locale}>{r.title} · {r.currency}</option>)}</select></label>
       {foreign&&<p role="status" className="rounded-xl bg-amber-50 p-3 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">国际选购候选适配 · 尚未完成当地官网全流程验收。仅处理本地区监控目标；银行卡、付款、分期及最终下单由本人完成，不承诺待支付锁单。请重新设置当地货币预算及资料。</p>}
@@ -177,7 +184,7 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
         <p className="text-xs text-muted-foreground sm:col-span-2 lg:col-span-3">{plan.installment_option && plan.installment_months ? `已选：${plan.installment_option} · ${plan.installment_months} 期。` : "请选择渠道下的期数。"}以上来自本次官网页面；选购时再次核验渠道、期数与零费率，不可用时保留现场，不替换方案。更多银行请使用官网手选。</p>
       </fieldset>}
       <h3>下单方式</h3>
-      <label className="submission-choice flex items-center gap-3"><input type="checkbox" disabled={locked || foreign || plan.financing === "manual" || plan.payment === "官网手动选择"} checked={!!plan.auto_submit_order} onChange={e => edit({auto_submit_order:e.target.checked})} /><span><strong>自动下单，等待本人支付</strong><small>{foreign?'本地区自动提交未开放，避免触发银行卡扣款。':'启用选购时需再次确认；关闭时停在最终提交前。'}</small></span></label>
+      <label className="submission-choice flex items-center gap-3"><input type="checkbox" disabled={locked || foreign || plan.financing === "manual" || plan.payment === "官网手动选择"} checked={!!plan.auto_submit_order} onChange={e => edit({auto_submit_order:e.target.checked})} /><span><strong>自动下单，等待本人支付</strong><small>{foreign?'本地区自动提交未开放，避免触发银行卡扣款。':'勾选后，点「启用有货自动选购」或「手动开始选购」就直接授权自动下单，不再弹窗确认；不勾选时停在最终提交前。'}</small></span></label>
       <h3>取货与购物袋</h3>
       <label>取货日期策略<select aria-label="取货日期策略" className="block rounded border bg-background text-foreground p-2" disabled={locked} value={datePolicy} onChange={e => edit({pickup_date_policy:e.target.value})}><option value="by_model">按型号 · Duo 指定日期，其他最早可取</option><option value="earliest">所有型号 · 最早可取</option><option value="specified">所有型号 · 指定日期</option></select></label>
       {datePolicy === "earliest" ? <p className="section-note">按官网当前最早可取日期选择最早可用签到时段；该日明确无时段时再试下一日期。已保存的指定日期仍保留，切回按型号或指定日期即可查看。</p> : <>

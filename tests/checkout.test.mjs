@@ -6,9 +6,11 @@ const presets=JSON.parse(readFileSync(new URL('../src/lib/installment-plans.json
 function ui(overrides={}, targets=[{locale:"zh_CN",storeNumber:"R575",partNumber:"TEST",storeTitle:"武汉",productName:"测试"}], props={}){
  const plan={max_price:20000,quantity:1,applecare:'none',payment:'支付宝',financing:'official',installment_option:'微信分付',installment_months:24,pickup_dates:[],clear_bag_before_purchase:true,auto_submit_order:false,...overrides};
  const status={plan,busy:false,armed:false,stopping:false};const hooks=[status,plan,'',false,true,''];let cursor=0;const calls=[];const dirty={current:false};
+ // 选购命令记下参数，其他后端命令（如开始监测）记下命令名；fail 里列出的会失败。
+ const fail=new Set();
  const Component=loadSource('src/components/AutoCheckout.tsx',s=>{
   if(s==='react')return {useEffect(){},useRef:()=>dirty,useState(initial){const i=cursor++;if(!(i in hooks))hooks[i]=initial;return [hooks[i],v=>{hooks[i]=typeof v==='function'?v(hooks[i]):v;}];}};
-  if(s==='@tauri-apps/api/core')return {invoke:async(_,args)=>{calls.push(args);return {...status,plan:hooks[1]};}};
+  if(s==='@tauri-apps/api/core')return {invoke:async(cmd,args)=>{const call=cmd==='checkout_command'?args:{cmd};calls.push(call);if(fail.has(call.op??call.cmd))throw new Error('模拟失败');return {...status,plan:hooks[1]};}};
   if(s==='@tauri-apps/api/event')return {listen:async()=>()=>{}};
   if(s==='@/lib/installment-plans.json')return presets;
   if(s==='@/lib/checkout-regions.json')return JSON.parse(readFileSync(new URL('../src/lib/checkout-regions.json',import.meta.url)));
@@ -18,7 +20,7 @@ function ui(overrides={}, targets=[{locale:"zh_CN",storeNumber:"R575",partNumber
  // 带上「是否被隐藏」：自身或任一上层 hidden，或者在没打开的配置弹窗里。
  // 弹窗底栏（footer）里的按钮也算在弹窗里。
  function shown(){cursor=0;const found=[];function walk(e,hidden){if(!e||typeof e!=='object')return;if(Array.isArray(e)){for(const c of e)walk(c,hidden);return;}const h=hidden||e.props?.hidden===true||(e.type==='ConfigModal'&&!e.props.open);if(e.type)found.push({node:e,hidden:h});walk(e.props?.children,h);if(e.type==='ConfigModal')walk(e.props.footer,h);}walk(Component({targets,...props}),false);return found;}
- return {hooks,calls,dirty,nodes,shown,button:text=>nodes().find(n=>n.props.children===text)};
+ return {hooks,calls,dirty,nodes,shown,fail,ops:()=>calls.map(x=>x.op??x.cmd),button:text=>nodes().find(n=>n.props.children===text)};
 }
 test('provider cards use individual term lists and one click writes both fields',()=>{
  const a=ui();const cards=a.nodes().filter(n=>n.type==='div'&&presets.some(p=>p.provider===n.key));
@@ -27,11 +29,22 @@ test('provider cards use individual term lists and one click writes both fields'
  assert.deepEqual(terms.map(x=>x.props.children[0]),[3,6,12]);terms[1].props.onClick();
  assert.equal(a.hooks[1].installment_option,'花呗分期');assert.equal(a.hooks[1].installment_months,6);assert.equal(a.dirty.current,true);
 });
-test('formal arming opens an in-app confirmation and cancel performs no commands',async()=>{
+test('arming with auto-submit starts directly, authorizes submission and starts monitoring',async()=>{
  const a=ui({auto_submit_order:true});globalThis.window={confirm:()=>{throw Error('native confirmation must not be used');}};
  a.button('启用有货自动选购').props.onClick();await new Promise(setImmediate);
- assert.equal(a.calls.length,0);assert.equal(a.hooks[6],'arm');
- a.button('取消').props.onClick();assert.equal(a.hooks[6],null);assert.equal(a.calls.length,0);
+ assert.equal(a.hooks[6],null,'不弹二次确认');
+ assert.deepEqual(a.ops(),['configure','arm','start_watching']);
+ assert.equal(a.calls[1].payload.confirmSubmission,true);
+});
+test('a failed arming never starts monitoring, and a monitoring failure is reported',async()=>{
+ const a=ui();a.fail.add('arm');
+ a.button('启用有货自动选购').props.onClick();await new Promise(setImmediate);
+ assert.deepEqual(a.ops(),['configure','arm'],'启用失败时不开始监测');
+ assert.match(a.hooks[2],/模拟失败/);
+ const b=ui();b.fail.add('start_watching');
+ b.button('启用有货自动选购').props.onClick();await new Promise(setImmediate);
+ assert.deepEqual(b.ops(),['configure','arm','start_watching']);
+ assert.match(b.hooks[2],/已启用自动选购，但库存监测没能开始/);
 });
 test('rehearsal never sends formal submission confirmation, even if configured on',async()=>{
  const a=ui({auto_submit_order:true});globalThis.window={confirm:()=>{throw Error('unexpected');}};
@@ -51,12 +64,10 @@ test('rehearsal remains disabled during an active checkout or stop',()=>{
  a.hooks[0].busy=false;a.hooks[0].stopping=true;
  assert.equal(a.button('测试演练').props.disabled,true);
 });
-test('formal arming confirms and saves the exact edited plan first',async()=>{
- const a=ui({auto_submit_order:true});globalThis.window={confirm:()=>true};
+test('arming saves the exact edited plan before enabling',async()=>{
+ const a=ui({auto_submit_order:true});
  a.button('启用有货自动选购').props.onClick();await new Promise(setImmediate);
- assert.equal(a.calls.length,0);
- a.button('确认启用并授权下单').props.onClick();await new Promise(setImmediate);
- assert.deepEqual(a.calls.map(x=>x.op),['configure','arm']);assert.equal(a.calls[1].payload.confirmSubmission,true);
+ assert.deepEqual(a.ops(),['configure','arm','start_watching']);assert.equal(a.calls[1].payload.confirmSubmission,true);
  assert.equal(a.calls[0].payload.plan.installment_option,'微信分付');assert.equal(a.calls[0].payload.plan.installment_months,24);
 });
 test('submission badge shows backend authorization rather than unsaved checkbox',()=>{
@@ -123,9 +134,9 @@ test('closed plan modal keeps the stop control available for armed, active and s
   a.hooks[0][state]=false;
  }
 });
-test('arming without submission permission does not require order confirmation',async()=>{
+test('arming without auto-submit stops before submission and still starts monitoring',async()=>{
  const a=ui();a.button('启用有货自动选购').props.onClick();await new Promise(setImmediate);
- assert.deepEqual(a.calls.map(x=>x.op),['configure','arm']);
+ assert.deepEqual(a.ops(),['configure','arm','start_watching']);
  assert.equal(a.calls[1].payload.confirmSubmission,false);
 });
 
@@ -212,13 +223,12 @@ test('manual start sends the selected target without asking when auto-submit is 
  assert.equal(a.calls[1].payload.targetKey, 'zh_CN|R683|B');
  assert.equal(a.calls[1].payload.confirmSubmission, false);
 });
-test('manual start with auto-submit asks first, then disarms an idle arming and sends the confirmation', async () => {
+test('manual start with auto-submit starts directly after disarming an idle arming', async () => {
  const a = ui({ auto_submit_order: true }); a.hooks[0].armed = true;
  assert.equal(a.button('手动开始选购').props.disabled, false, '已启用但空闲时也能手动开始');
  a.button('手动开始选购').props.onClick(); await new Promise(setImmediate);
- assert.equal(a.calls.length, 0); assert.equal(a.hooks[6], 'manual');
- a.button('确认开始并授权下单').props.onClick(); await new Promise(setImmediate);
- assert.deepEqual(a.calls.map(x => x.op), ['disarm', 'configure', 'manual']);
+ assert.equal(a.hooks[6], null, '不弹二次确认');
+ assert.deepEqual(a.ops(), ['disarm', 'configure', 'manual'], '手动开始不另外开始监测');
  assert.equal(a.calls.at(-1).payload.confirmSubmission, true);
 });
 test('manual start stays disabled while a checkout runs, is stopping, or for other regions', () => {
