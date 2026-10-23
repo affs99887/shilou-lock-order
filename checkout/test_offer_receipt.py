@@ -50,14 +50,24 @@ class OfferReceiptTests(unittest.TestCase):
     def test_order_access_profile_and_activation_guards_have_explicit_receipts(self):
         self.bridge.armed = True
         for owner, field, outcome in [(self.bridge, 'activation_pending', 'activating'),
-                                     (self.bridge, 'profile_required', 'profile_required'),
-                                     (self.bridge.service, 'access_blocked', 'blocked')]:
+                                     (self.bridge, 'profile_required', 'profile_required')]:
             with self.subTest(outcome=outcome):
                 setattr(owner, field, True)
                 self.assert_not_queued(outcome)
                 setattr(owner, field, False)
+        self.bridge.reserved = True
+        self.bridge.service.access_blocked = True
+        self.assert_not_queued('blocked')
+        self.bridge.reserved = False
+        self.bridge.service.access_blocked = False
         self.bridge.order_guard.begin()
         self.assert_not_queued('order_review')
+
+    def test_explicit_rearm_is_not_vetoed_by_an_old_access_diagnostic(self):
+        self.bridge.service.access_blocked = True
+        self.bridge.armed = True
+        self.assertEqual(self.offer()['offer']['outcome'], 'queued')
+        self.assertEqual(self.bridge.tasks.qsize(), 1)
 
     def test_only_valid_selected_target_is_accepted_and_matches_rust_fixture(self):
         self.bridge.armed = True

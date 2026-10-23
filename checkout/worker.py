@@ -532,7 +532,10 @@ class Bridge:
                     return self.offer_reply(hits, 'stopping')
                 if self.order_guard.blocked:
                     return self.offer_reply(hits, 'order_review')
-                if getattr(self.service, 'access_blocked', False):
+                # Describe an existing blocked task, but don't let its old
+                # diagnostic veto a later explicit stop/re-arm forever.
+                if (getattr(self.service, 'access_blocked', False) and
+                        (self.reserved or not self.armed)):
                     return self.offer_reply(hits, 'blocked')
                 if self.activation_pending:
                     return self.offer_reply(hits, 'activating')
