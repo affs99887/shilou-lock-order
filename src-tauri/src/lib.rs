@@ -9,11 +9,12 @@
 //! 系统节流甚至挂起，把「及时提醒」挂在一个会被挂起的执行环境上是不能接受的。
 
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use apw_core::apple::{AppleClient, ClientConfig};
 use apw_core::catalog::Catalog;
-use apw_core::config::{Settings, SettingsStore};
+use apw_core::config::{MonitorMode, Settings, SettingsStore};
 use apw_core::model::{Category, Product, REGIONS, Store, Target, region_by_locale};
 use apw_core::notify::{Bark, Feishu, Multi, Notification, Notifier};
 use apw_core::watcher::{Event, TargetState, Watcher, WatcherConfig};
@@ -26,7 +27,9 @@ use tauri_plugin_updater::UpdaterExt;
 mod auto_open;
 mod checkout;
 mod checkout_hits;
+mod cloud_bridge;
 mod community;
+mod diagnostics;
 mod monitor_policy;
 mod notification_queue;
 
@@ -60,8 +63,17 @@ struct CategoryDto {
 }
 
 struct AppState {
+    /// 切换库存来源、开停监测和改监控目标一次只做一件，免得两套查询的状态被同时改乱。
+    control: tokio::sync::Mutex<()>,
     checkout: checkout::Checkout,
+    /// 本机查询：用这台电脑的网络直接查 Apple。
     watcher: Watcher,
+    /// 云端查询：通过 v-ss.me 的网页查询。和本机查询只会有一个在跑。
+    cloud_watcher: Watcher,
+    cloud: cloud_bridge::CloudFetcher,
+    /// 最近一次切换来源或开停监测的时刻（Unix 毫秒）；早于它的查询结果一律不用。
+    mode_since: AtomicU64,
+    diagnostics: diagnostics::Diagnostics,
     community: community::Community,
     catalog: Catalog,
     http: reqwest::Client,
@@ -72,6 +84,33 @@ struct AppState {
 }
 
 impl AppState {
+    /// 当前库存来源对应的那套查询。
+    fn active_watcher(&self) -> &Watcher {
+        if self.settings_snapshot().monitor_mode == MonitorMode::Cloud {
+            &self.cloud_watcher
+        } else {
+            &self.watcher
+        }
+    }
+
+    /// 两套查询的目标保持一致，切换来源时不用重新下发。
+    async fn sync_targets(&self, targets: Vec<Target>) {
+        self.watcher.set_targets(targets.clone()).await;
+        self.cloud_watcher
+            .set_targets(cloud_bridge::targets(targets))
+            .await;
+    }
+
+    /// 两套查询都停下，并取消还没回来的云端请求。
+    async fn stop_all(&self) {
+        self.mode_since
+            .store(cloud_bridge::now_ms(), Ordering::SeqCst);
+        self.cloud.cancel();
+        self.watcher.stop().await;
+        self.cloud_watcher.stop().await;
+        self.cloud.cancel();
+    }
+
     fn settings_snapshot(&self) -> Settings {
         self.settings
             .read()
@@ -163,7 +202,10 @@ async fn save_settings(
     state: tauri::State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
+    let _control = state.control.lock().await;
     let mut next = settings;
+    // 库存来源只在 set_monitor_mode 里改，这里沿用当前值，免得和切换撞在一起。
+    next.monitor_mode = state.settings_snapshot().monitor_mode;
     monitor_policy::apply(&mut next);
     next.normalize();
     state.catalog.attach_companions(&mut next.targets);
@@ -174,7 +216,7 @@ async fn save_settings(
     }
 
     // 设置里的目标列表和查询间隔要同步给引擎，否则改完设置监控还按旧的跑。
-    state.watcher.set_targets(next.targets.clone()).await;
+    state.sync_targets(next.targets.clone()).await;
     state.watcher.set_interval(next.interval()).await;
     state.community.set_targets(&next.targets);
 
@@ -201,7 +243,7 @@ async fn set_push_urls(
 
 #[tauri::command]
 async fn get_snapshot(state: tauri::State<'_, AppState>) -> Result<Vec<TargetState>, String> {
-    Ok(state.watcher.snapshot().await)
+    Ok(state.active_watcher().snapshot().await)
 }
 
 #[tauri::command]
@@ -209,18 +251,19 @@ async fn set_targets(
     state: tauri::State<'_, AppState>,
     targets: Vec<Target>,
 ) -> Result<Vec<TargetState>, String> {
+    let _control = state.control.lock().await;
     if state.checkout.engaged() {
         return Err("请先停止自动选购，再修改监控目标".into());
     }
     let mut targets = targets;
     state.catalog.attach_companions(&mut targets);
     state.catalog.attach_locations(&mut targets);
-    state.watcher.set_targets(targets.clone()).await;
+    state.sync_targets(targets.clone()).await;
     state.community.set_targets(&targets);
     let mut next = state.settings_snapshot();
     next.targets = targets;
     state.put_settings(next)?;
-    Ok(state.watcher.snapshot().await)
+    Ok(state.active_watcher().snapshot().await)
 }
 
 #[tauri::command]
@@ -236,6 +279,7 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
 
 #[tauri::command]
 async fn start_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _control = state.control.lock().await;
     let status = tauri::async_runtime::spawn_blocking(move || {
         app.state::<AppState>()
             .checkout
@@ -246,22 +290,92 @@ async fn start_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Re
     if checkout::access_restricted(&status) {
         return Err("选购请求被 Apple 拒绝；请在限制解除后完成测试演练，再恢复监控。".into());
     }
-    state.watcher.start().await;
+    state
+        .mode_since
+        .store(cloud_bridge::now_ms(), Ordering::SeqCst);
+    state.active_watcher().start().await;
     state.community.set_running(true);
     Ok(())
 }
 
 #[tauri::command]
 async fn stop_watching(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _control = state.control.lock().await;
     state.community.set_running(false);
     state.checkout.stop_if_started();
-    state.watcher.stop().await;
+    state.stop_all().await;
     Ok(())
 }
 
 #[tauri::command]
 async fn is_running(state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    Ok(state.watcher.is_running().await)
+    Ok(state.active_watcher().is_running().await)
+}
+
+/// 切换库存来源：先停掉监测，清空两边的库存结果，目标和选购方案保留；
+/// 之后由用户点「开始监测」或「启用有货自动选购」重新开始。
+#[tauri::command]
+async fn set_monitor_mode(app: AppHandle, mode: MonitorMode) -> Result<Settings, String> {
+    let state = app.state::<AppState>();
+    let _control = state.control.lock().await;
+    if state.settings_snapshot().monitor_mode == mode {
+        return Ok(state.settings_snapshot());
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        handle
+            .state::<AppState>()
+            .checkout
+            .request(serde_json::json!({"op":"prepare_switch"}))
+    })
+    .await
+    .map_err(|_| "无法切换库存来源")??;
+    state.community.set_running(false);
+    state.stop_all().await;
+    let mut next = state.settings_snapshot();
+    next.monitor_mode = mode;
+    // 先清空再放回目标：旧来源查到的结果不能留在表里，更不能交给选购。
+    state.sync_targets(Vec::new()).await;
+    state.sync_targets(next.targets.clone()).await;
+    // 写盘失败时内存里已经切过去了，照常返回，只提示没保存上。
+    if let Err(err) = state.put_settings(next.clone()) {
+        let _ = app.emit(
+            NOTICE_CHANNEL,
+            format!("库存来源已切换，但设置没能保存：{err}"),
+        );
+    }
+    let _ = app.emit(EVENT_CHANNEL, Event::RunStateChanged { running: false });
+    Ok(next)
+}
+
+/// 补货记录：每次补货的发现时间、最后确认有货的时间和确认无货的时间，新的在前。
+#[tauri::command]
+async fn get_restock_records(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<diagnostics::RestockRow>, String> {
+    let recorder = state.diagnostics.clone();
+    tauri::async_runtime::spawn_blocking(move || recorder.history())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 把查询记录导出到「下载」文件夹，方便排查问题；不含账号、Cookie 或结账资料。
+#[tauri::command]
+async fn export_monitor_diagnostics(
+    state: tauri::State<'_, AppState>,
+) -> Result<diagnostics::Export, String> {
+    let recorder = state.diagnostics.clone();
+    let base = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .ok_or("找不到导出目录")?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis();
+    let directory = base.join(format!("拾漏锁单诊断-{stamp}"));
+    tauri::async_runtime::spawn_blocking(move || recorder.export(directory))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// 一个待安装的更新。
@@ -404,13 +518,28 @@ async fn checkout_command(
     }
     if op == "purchase" {
         let state = app.state::<AppState>();
-        let key = message["targetKey"].as_str().ok_or("请选择有货目标")?;
+        let key = message["targetKey"]
+            .as_str()
+            .ok_or("请选择有货目标")?
+            .to_string();
         let settings = state.settings_snapshot();
-        let snapshot = state.watcher.snapshot().await;
+        let snapshot = state.active_watcher().snapshot().await;
         // Preserve the real observation. An explicit manual selection is
         // checked against the official product page, without inventing a hit.
         message["hit"] =
-            checkout_hits::for_manual(key, &settings.targets, &snapshot, &state.catalog)?;
+            checkout_hits::for_manual(&key, &settings.targets, &snapshot, &state.catalog)?;
+        if settings.monitor_mode == MonitorMode::Cloud {
+            // 云端的有货结果要看对方服务器给的时间，超过 90 秒就不算数了。
+            let target = settings
+                .targets
+                .iter()
+                .find(|t| t.key().0 == key)
+                .ok_or("目标已变更，请重新选择")?;
+            let stamp = state.cloud.stamp(target).ok_or("云端库存尚未确认")?;
+            if cloud_bridge::now_ms().saturating_sub(stamp) > 90_000 {
+                return Err("云端结果已过期，请等待下一次查询".into());
+            }
+        }
     }
     tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().checkout.request(message))
         .await
@@ -479,8 +608,12 @@ fn emit_system_notification(app: &AppHandle, n: &Notification) {
     }
 }
 
-/// 消费引擎事件：转发给前端，并在有货时发提醒。
-async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Event>) {
+/// 消费引擎事件：转发给前端，并在有货时发提醒。本机和云端各有一路，只处理当前来源的。
+async fn pump_events(
+    app: AppHandle,
+    source: MonitorMode,
+    mut events: tokio::sync::mpsc::Receiver<Event>,
+) {
     let mut auto_open_bag = AutoOpenBag::default();
     let (notifications, pending) = notification_queue::channel();
     let notification_app = app.clone();
@@ -493,7 +626,48 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
         }
     }));
 
+    // 这一路的引擎是否在跑，按它发来的开停事件记。不去向引擎查询：引擎往满了的
+    // 事件队列里塞事件时，在这里等它答复会和它互相等住。
+    let mut running = false;
     while let Some(event) = events.recv().await {
+        let current = app.state::<AppState>();
+        if let Event::RunStateChanged { running: now } = &event {
+            running = *now;
+        }
+        // 只用当前来源、正在运行、并且晚于最近一次切换或开停的结果。
+        if current.settings_snapshot().monitor_mode != source {
+            continue;
+        }
+        let since = current.mode_since.load(Ordering::SeqCst);
+        let fresh = |row: &TargetState| row.last_checked_ms.is_some_and(|t| t >= since);
+        match &event {
+            Event::RunStateChanged { .. } => {}
+            _ if !running => continue,
+            Event::InStock { state } | Event::StateChanged { state } if !fresh(state) => continue,
+            Event::CycleComplete { snapshot, .. } if !snapshot.iter().any(fresh) => continue,
+            _ => {}
+        }
+
+        let cloud = source == MonitorMode::Cloud;
+        let recorder = &current.diagnostics;
+        if matches!(&event, Event::RunStateChanged { running: true }) {
+            recorder.scope(&current.settings_snapshot().targets);
+        }
+        if matches!(
+            &event,
+            Event::CycleComplete { .. } | Event::RunStateChanged { running: true }
+        ) {
+            recorder.inventory_source(
+                if cloud { "cloud" } else { "local" },
+                if cloud {
+                    current.cloud.status()
+                } else {
+                    serde_json::Value::Null
+                },
+            );
+        }
+        recorder.event(&event, cloud);
+
         // 先原样转发。前端拿到的事件流应当与引擎发出的完全一致，
         // 中间少一层可能出错的翻译。
         let _ = app.emit(EVENT_CHANNEL, &event);
@@ -501,7 +675,25 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
         if let Event::CycleComplete { .. } = &event {
             let state = app.state::<AppState>();
             let settings = state.settings_snapshot();
-            let hits = checkout_hits::for_event(&event, &settings.targets, &state.catalog);
+            let mut hits = checkout_hits::for_event(&event, &settings.targets, &state.catalog);
+            if cloud {
+                // 云端结果按对方服务器给的时间算新鲜度，最多 90 秒；选购那边再按来源规则核对一遍。
+                hits.retain_mut(|hit| {
+                    let Ok(target) = serde_json::from_value::<Target>(hit["target"].clone()) else {
+                        return false;
+                    };
+                    let Some(stamp) = state.cloud.stamp(&target) else {
+                        return false;
+                    };
+                    if cloud_bridge::now_ms().saturating_sub(stamp) > 90_000 {
+                        return false;
+                    }
+                    hit["source"] = serde_json::json!("vss_cloud");
+                    hit["reportedAtMs"] = serde_json::json!(stamp);
+                    hit["receivedAtMs"] = hit["lastCheckedMs"].clone();
+                    true
+                });
+            }
             if !hits.is_empty() {
                 let handle = app.clone();
                 let _ = tauri::async_runtime::spawn_blocking(move || {
@@ -742,6 +934,42 @@ pub fn run() {
             let client = AppleClient::new(ClientConfig::default())
                 .map_err(|e| format!("构造 Apple 客户端失败：{e}"))?;
 
+            // 查询记录写到本机日志目录，有上限地轮换；只记查询本身，不记账号或结账资料。
+            // 目录建不出来时改写到临时目录，记录不能影响监测启动。
+            let log_dir = dirs::data_local_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(if cfg!(feature = "international-preview") {
+                    "apple-pickup-watcher-international"
+                } else {
+                    "apple-pickup-watcher-auto"
+                })
+                .join("monitor-logs");
+            let version = app.package_info().version.to_string();
+            let diagnostics = match diagnostics::Diagnostics::start(log_dir, &version) {
+                Ok(recorder) => recorder,
+                Err(err) => {
+                    notices.push(format!("查询记录目录不可用，本次改写到临时目录：{err}"));
+                    diagnostics::Diagnostics::start(
+                        std::env::temp_dir().join("apw-monitor-logs"),
+                        &version,
+                    )?
+                }
+            };
+            diagnostics.scope(&settings.targets);
+            let mut request_events = client.subscribe_requests();
+            let request_recorder = diagnostics.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match request_events.recv().await {
+                        Ok(record) => request_recorder.request(&record),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            request_recorder.gap(n)
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+
             // 用 Watcher::new 而不是 Watcher::spawn：setup 回调跑在主线程上，
             // 并不处在 tokio 运行时上下文里，在这里 tokio::spawn 会 panic，
             // 而且因为发生在不可展开的回调中，进程会直接 abort。
@@ -755,13 +983,38 @@ pub fn run() {
             );
             tauri::async_runtime::spawn(engine);
 
+            // 云端查询：一轮 60 秒，门店一家一家查，相邻两次至少隔 12 秒（由 CloudFetcher 控制）；
+            // 失败不拉长间隔。每条云端记录写进诊断日志，也发给界面写进查询日志。
+            let cloud_recorder = diagnostics.clone();
+            let cloud_app = app.handle().clone();
+            let cloud =
+                cloud_bridge::CloudFetcher::new(app.handle().clone()).with_log_sink(move |event| {
+                    let _ = cloud_app.emit("cloud://event", &event);
+                    cloud_recorder.cloud_event(event);
+                });
+            let (cloud_watcher, cloud_events, cloud_engine) = Watcher::new(
+                cloud.clone(),
+                WatcherConfig {
+                    interval: Duration::from_secs(60),
+                    failure_backoff: false,
+                    concurrency: 1,
+                    jitter: 0.0,
+                    ..WatcherConfig::default()
+                },
+            );
+            tauri::async_runtime::spawn(cloud_engine);
+
             {
                 let watcher = watcher.clone();
+                let cloud_watcher = cloud_watcher.clone();
                 let targets = settings.targets.clone();
                 let interval = settings.interval();
                 tauri::async_runtime::spawn(async move {
-                    watcher.set_targets(targets).await;
+                    watcher.set_targets(targets.clone()).await;
                     watcher.set_interval(interval).await;
+                    cloud_watcher
+                        .set_targets(cloud_bridge::targets(targets))
+                        .await;
                 });
             }
 
@@ -769,6 +1022,7 @@ pub fn run() {
                 community::Community::new(settings.targets.clone());
             let community_client = apw_core::community::Client::new()?;
             app.manage(AppState {
+                control: tokio::sync::Mutex::new(()),
                 checkout: checkout::Checkout::new(app.path().resource_dir()?.join(
                     if cfg!(target_os = "windows") {
                         "resources/apw-checkout.exe"
@@ -779,6 +1033,10 @@ pub fn run() {
                     },
                 )),
                 watcher,
+                cloud_watcher,
+                cloud,
+                mode_since: AtomicU64::new(cloud_bridge::now_ms()),
+                diagnostics,
                 community,
                 catalog,
                 http: reqwest::Client::new(),
@@ -792,7 +1050,12 @@ pub fn run() {
                 community_control,
                 community_client,
             ));
-            tauri::async_runtime::spawn(pump_events(handle.clone(), events));
+            tauri::async_runtime::spawn(pump_events(handle.clone(), MonitorMode::Local, events));
+            tauri::async_runtime::spawn(pump_events(
+                handle.clone(),
+                MonitorMode::Cloud,
+                cloud_events,
+            ));
             let checkout_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
                 let (notifications, pending) = notification_queue::channel();
@@ -827,8 +1090,8 @@ pub fn run() {
                         if checkout::access_restricted(&status) {
                             let state = checkout_handle.state::<AppState>();
                             state.community.set_running(false);
-                            if state.watcher.is_running().await {
-                                state.watcher.stop().await;
+                            if state.active_watcher().is_running().await {
+                                state.stop_all().await;
                                 let _ = checkout_handle.emit(
                                     NOTICE_CHANNEL,
                                     "官网拒绝选购请求，库存监控已同步停止；请核对官网现场。",
@@ -881,27 +1144,48 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            list_regions,
-            list_categories,
-            list_stores,
-            list_products,
-            refresh_products,
-            get_settings,
-            get_community_status,
-            save_settings,
-            set_push_urls,
-            get_snapshot,
-            set_targets,
-            set_interval,
-            start_watching,
-            stop_watching,
-            is_running,
-            test_notify,
-            check_for_update,
-            install_update,
-            checkout_command,
-        ])
+        .invoke_handler(|invoke| {
+            // 云端查询会打开一个装着外部网页的隐藏窗口。只有主窗口里软件自己的页面
+            // 能调用这些命令，外部网页一律拒绝。
+            let view = invoke.message.webview();
+            let local = view.url().is_ok_and(|url| {
+                (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+                    || (matches!(url.scheme(), "http" | "https")
+                        && url.host_str() == Some("tauri.localhost"))
+                    || (cfg!(debug_assertions)
+                        && url.host_str() == Some("localhost")
+                        && url.port() == Some(1420))
+            });
+            if view.label() != "main" || !local {
+                invoke.resolver.reject("外部网页不能调用软件功能");
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                list_regions,
+                list_categories,
+                list_stores,
+                list_products,
+                refresh_products,
+                get_settings,
+                get_community_status,
+                save_settings,
+                set_push_urls,
+                get_snapshot,
+                set_targets,
+                set_interval,
+                start_watching,
+                stop_watching,
+                is_running,
+                set_monitor_mode,
+                get_restock_records,
+                export_monitor_diagnostics,
+                test_notify,
+                check_for_update,
+                install_update,
+                checkout_command,
+            ];
+            handler(invoke)
+        })
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
 }

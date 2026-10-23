@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   Bell,
   Download,
+  FileDown,
+  History,
   Pause,
   Play,
   Plus,
@@ -17,6 +19,7 @@ import { Combobox } from "@/components/Combobox";
 import { BarkSettings } from "@/components/BarkSettings";
 import { AutoCheckout } from "@/components/AutoCheckout";
 import { ConfigModal } from "@/components/ConfigModal";
+import { RestockRecords } from "@/components/RestockRecords";
 import { useInventoryPurchase } from "@/lib/inventory-purchase";
 import { MultiCombobox } from "@/components/MultiCombobox";
 import { Badge } from "@/components/ui/badge";
@@ -49,9 +52,11 @@ import {
   changeLocale,
   connect,
   dismissUpdate,
+  exportDiagnostics,
   installUpdate,
   refreshProducts,
   setCategory,
+  setMonitorMode,
   setTargets,
   startWatching,
   stopWatching,
@@ -64,6 +69,7 @@ import {
   describeAvailability,
   formatTime,
   isUntrusted,
+  type MonitorMode,
   type Product,
   type StatusTone,
   type Target,
@@ -82,8 +88,8 @@ const TONE_CLASS: Record<StatusTone, string> = {
   pending: "bg-transparent text-muted-foreground/60 border-dashed",
 };
 
-function StatusBadge({ availability }: { availability: Availability }) {
-  const { label, tone, detail } = describeAvailability(availability);
+function StatusBadge({ availability, source }: { availability: Availability; source: MonitorMode }) {
+  const { label, tone, detail } = describeAvailability(availability, source);
   const badge = (
     <Badge variant="outline" className={`min-w-18 justify-center ${TONE_CLASS[tone]}`}>
       {label}
@@ -118,6 +124,24 @@ function RunState({ running, detail }: { running: boolean; detail?: string }) {
       {running ? <span className="text-foreground">监测运行中</span> : "监测已停止"}
       {running && detail && <span>{detail}</span>}
     </span>
+  );
+}
+
+const SOURCES: { mode: MonitorMode; label: string; title: string }[] = [
+  { mode: "cloud", label: "云端", title: "通过 v-ss.me 的网页查询库存，本机网络不向 Apple 查库存，留给选购用。对方限流或查不到时不会自动换回本机。" },
+  { mode: "local", label: "本机", title: "用这台电脑的网络直接向 Apple 查库存。" },
+];
+
+/** 库存来源切换。切换会先停下监测，之后点「开始监测」或「启用有货自动选购」重新查。 */
+function SourceSwitch({ mode, disabled }: { mode: MonitorMode; disabled: boolean }) {
+  return (
+    <div className="source-switch" role="group" aria-label="库存来源">
+      <span>库存来源</span>
+      {SOURCES.map(s => (
+        <button key={s.mode} type="button" aria-pressed={mode === s.mode} title={s.title}
+          disabled={disabled} onClick={() => void setMonitorMode(s.mode)}>{s.label}</button>
+      ))}
+    </div>
   );
 }
 
@@ -184,6 +208,9 @@ export default function App() {
   const [colors, setColors] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
+  const [restocksOpen, setRestocksOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const source = ui.settings.monitorMode ?? "cloud";
   // 下一轮查询的时刻：每轮结束时按引擎报的等待秒数换算一次，之后每秒刷新显示的倒计时。
   const [nextAt, setNextAt] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -324,6 +351,7 @@ export default function App() {
             <div className="toolbar-run-state"><RunState running={ui.running} detail={nextQueryText(ui.running, nextAt, now)} /></div>
             {ui.running && ui.pacing?.paced && <span className="toolbar-note">查询预算等待</span>}
             {community && <span className="toolbar-note toolbar-community" title={community.title}>{community.text}</span>}
+            <SourceSwitch mode={source} disabled={!ui.ready || ui.switching} />
             <Button variant="ghost" aria-haspopup="dialog" aria-expanded={settingsOpen} aria-controls="notification-settings" onClick={() => setSettingsOpen(!settingsOpen)}>
               <Bell /> 手机提醒
             </Button>
@@ -332,7 +360,7 @@ export default function App() {
                 <Pause /> 暂停监测
               </Button>
             ) : (
-              <Button className="monitor-toggle" onClick={() => void startWatching()} disabled={ui.rows.length === 0}>
+              <Button className="monitor-toggle" onClick={() => void startWatching()} disabled={ui.rows.length === 0 || ui.switching}>
                 <Play /> 开始监测
               </Button>
             )}
@@ -508,7 +536,7 @@ export default function App() {
                       )}
                     >
                       <TableCell className="pl-4">
-                        <StatusBadge availability={row.availability} />
+                        <StatusBadge availability={row.availability} source={source} />
                       </TableCell>
                       <TableCell className="font-medium">{row.target.storeTitle}</TableCell>
                       <TableCell className="text-muted-foreground">
@@ -544,12 +572,27 @@ export default function App() {
         {purchase.error && <p role="alert" className="text-destructive">{purchase.error}</p>}
 
         <section id="query-logs" aria-labelledby="query-logs-title" className="query-logs shrink-0">
-          <div className="logs-heading"><h2 id="query-logs-title">查询日志</h2><span>最新的在最下面，有货的行标绿</span></div>
+          <div className="logs-heading">
+            <h2 id="query-logs-title">查询日志</h2>
+            <span>最新的在最下面，有货的行标绿</span>
+            <div className="logs-actions">
+              <Button variant="ghost" size="sm" aria-haspopup="dialog" aria-expanded={restocksOpen} aria-controls="restock-records" onClick={() => setRestocksOpen(true)}>
+                <History /> 补货记录
+              </Button>
+              <Button variant="ghost" size="sm" disabled={exporting} title="把查询记录导出到「下载」文件夹，方便排查问题；不含账号、Cookie 或结账资料"
+                onClick={() => { setExporting(true); void exportDiagnostics().finally(() => setExporting(false)); }}>
+                <FileDown /> {exporting ? "正在导出…" : "导出诊断记录"}
+              </Button>
+            </div>
+          </div>
           <div ref={logBox} role="log" className="logs-body font-mono select-text"
             onScroll={e => { const box = e.currentTarget; followLogs.current = box.scrollHeight - box.scrollTop - box.clientHeight < 24; }}>
             {ui.logs.length === 0 ? <p className="text-muted-foreground">开始监控后，查询记录会显示在这里。</p> : ui.logs.map((line, i) => <LogLine key={i} line={line} />)}
           </div>
         </section>
+        <ConfigModal id="restock-records" open={restocksOpen} title="补货记录" description="监测期间自动记下每次补货：什么时候开始有货、最后一次确认有货、什么时候确认无货。重启后还在，最多保留 500 条。" closeLabel="关闭补货记录" onClose={() => setRestocksOpen(false)}>
+          <RestockRecords open={restocksOpen} refreshKey={ui.rows} />
+        </ConfigModal>
         <ConfigModal id="notification-settings" narrow open={settingsOpen} title="手机提醒" description="保存后生效；关闭窗口会保留未保存的输入。" closeLabel="关闭手机提醒" onClose={() => setSettingsOpen(false)}>
           <div data-testid="settings-page" className="settings-grid">
             <BarkSettings saved={ui.settings.barkUrl || ""} />

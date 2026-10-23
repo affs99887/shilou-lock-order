@@ -17,7 +17,7 @@ await context.addInitScript(()=>{
  const stores=['上海-环球港','上海-香港广场','上海-五角场','上海-上海环贸 iapm','上海-浦东','上海-静安','上海-南京东路'].map((title,i)=>({number:`TEST${i+1}`,name:title,title}));
  const products=['星光白','夜空色'].map((color,i)=>({partNumber:`DEMO${i}`,category:'iphone',family:'iphoneduo',capacity:'1TB',color,title:`iPhone Duo 1TB ${color}`}));
  const rows=new URLSearchParams(location.search).has('empty') ? [] : stores.map((s,j)=>{const p=products[j%2];return ({target:{locale:'zh_CN',storeNumber:s.number,storeTitle:s.title,partNumber:p.partNumber,productName:p.title},availability:j===0?{kind:'in_stock'}:j===3?{kind:'unknown',reason:'transport',detail:'演示：连接暂不可用'}:j===5?{kind:'unknown',reason:'not_yet_checked'}:{kind:'out_of_stock'},lastCheckedMs:Date.now(),consecutiveFailures:0});});
- const settings={locale:'zh_CN',targets:rows.map(r=>r.target),intervalSeconds:60,barkUrl:'',feishuWebhook:'',proxies:['http://127.0.0.1:18001','http://127.0.0.1:18002'],soundEnabled:false,openBagOnHit:false};
+ const settings={locale:'zh_CN',targets:rows.map(r=>r.target),intervalSeconds:60,barkUrl:'',feishuWebhook:'',proxies:['http://127.0.0.1:18001','http://127.0.0.1:18002'],soundEnabled:false,openBagOnHit:false,monitorMode:'cloud'};
  const plan={max_price:20000,quantity:1,applecare:'none',payment:'支付宝',financing:'official',installment_option:'微信分付',installment_months:24,pickup_dates:['2026-10-23'],clear_bag_before_purchase:true,auto_submit_order:false};
  const status={armed:false,busy:false,stopping:false,mode:'idle',stage:'idle',reason:'尚未启用自动选购',elapsed:0,plan,submissionEnabled:false};
  window.__UI_CALLS__=[]; window.__CHECKOUT_STATUS__=status;
@@ -30,6 +30,9 @@ await context.addInitScript(()=>{
  if(cmd in values)return values[cmd];
  if(cmd==='get_community_status')return {running:false,lastCheckedMs:null,lastSignal:null,error:null,nextCheckInSecs:null};
  if(cmd==='save_settings'){Object.assign(settings,args.settings);return structuredClone(settings);}
+ if(cmd==='set_monitor_mode'){settings.monitorMode=args.mode;return structuredClone(settings);}
+ if(cmd==='get_restock_records')return [{key:'zh_CN|TEST1|DEMO0',storeTitle:'上海-环球港',productName:'iPhone Duo 1TB 星光白',foundAtMs:Date.now()-3600e3,lastInStockMs:Date.now()-3000e3,endedAtMs:Date.now()-2900e3,currentStatus:'无货',checkedAtMs:Date.now()}];
+ if(cmd==='export_monitor_diagnostics')return {directory:'C:/Users/demo/Downloads/拾漏锁单诊断-1',droppedRecords:0,writeError:null};
  if(cmd==='checkout_command'){if(args.op==='configure')status.plan=args.payload.plan;if(args.op==='arm'){status.armed=true;status.reason='已启用，等待命中';}if(args.op==='stop'){status.armed=false;status.reason='已停止选购';}if(args.op==='end_run')Object.assign(status,{busy:false,armed:status.autoPaused,mode:'stopped',singleRun:null,autoPaused:false,reason:'已结束本次选购。自动选购已恢复，有货后自动选购',lastResult:'已结束本次选购。自动选购已恢复，有货后自动选购'});if(args.op!=='status')window.__EMIT__('checkout://status',structuredClone(status));return structuredClone(status);}
  return null;
  }};
@@ -80,6 +83,33 @@ await screenshot(page,'light.png',{fullPage:true});
 await page.emulateMedia({colorScheme:'dark'});
 await screenshot(page,'dark.png',{fullPage:true});
 await page.emulateMedia({colorScheme:'light'});
+
+// 库存来源：顶栏里和「开始监测」排在同一行，1000 宽时也不换行、不挤出页面。
+const sourceSwitch=page.getByRole('group',{name:'库存来源'});
+assert.equal(await sourceSwitch.getByRole('button',{name:'云端',exact:true}).getAttribute('aria-pressed'),'true');
+for(const width of [1280,1000]){
+ await page.setViewportSize({width,height:900});
+ const sw=await sourceSwitch.boundingBox(), start=await page.getByRole('button',{name:'开始监测',exact:true}).boundingBox();
+ assert.ok(Math.abs((sw.y+sw.height/2)-(start.y+start.height/2))<4,`source switch shares the toolbar row at ${width}px`);
+ await noOverflow();
+}
+await page.setViewportSize({width:1280,height:900});
+await screenshot(page.locator('.app-toolbar'),'toolbar-source.png');
+await sourceSwitch.getByRole('button',{name:'本机',exact:true}).click();
+await page.waitForFunction(()=>window.__UI_CALLS__.some(c=>c.cmd==='set_monitor_mode'&&c.args.mode==='local'));
+await page.getByText('库存来源已切换为本机网络',{exact:false}).waitFor();
+assert.equal(await sourceSwitch.getByRole('button',{name:'本机',exact:true}).getAttribute('aria-pressed'),'true');
+await sourceSwitch.getByRole('button',{name:'云端',exact:true}).click();
+await page.getByText('库存来源已切换为云端',{exact:false}).waitFor();
+// 补货记录在弹窗里，日志区本身不折叠。
+await page.getByRole('button',{name:'补货记录',exact:true}).click();
+const restocks=page.getByRole('dialog',{name:'补货记录'});
+await restocks.getByText('iPhone Duo 1TB 星光白').waitFor();
+await screenshot(restocks,'restock-records.png');
+await page.keyboard.press('Escape');
+assert.equal(await restocks.isVisible(),false,'Esc closes the restock records');
+await page.getByRole('button',{name:'导出诊断记录',exact:true}).click();
+await page.getByText('诊断记录已导出到',{exact:false}).waitFor();
 
 // 有货行的「立即选购」点一下直接发出选购，不弹确认窗。
 await page.getByRole('button',{name:'立即选购',exact:true}).click();
@@ -171,5 +201,5 @@ await page.getByText('从一个心仪的型号开始').waitFor();
 assert.equal(await page.getByRole('button',{name:'开始监测',exact:true}).isEnabled(),false);
 await screenshot(page,'empty.png',{fullPage:true});
 assert.deepEqual(errors,[]);
-console.log('UI preview passed: one-screen layout with a compact checkout strip on top and logs docked at the bottom, both themes, 1280/1000 widths, state-dependent action buttons on one row, add button fixed in the add-monitor panel, target/Bark/contact/plan draft retention in modals, one-click arming that also starts monitoring, ending a paused manual run without turning auto checkout off, one-click row purchase. Mocked IPC only; external requests blocked.');
+console.log('UI preview passed: one-screen layout with a compact checkout strip on top and logs docked at the bottom, both themes, 1280/1000 widths, state-dependent action buttons on one row, add button fixed in the add-monitor panel, target/Bark/contact/plan draft retention in modals, one-click arming that also starts monitoring, ending a paused manual run without turning auto checkout off, one-click row purchase, the cloud/local source switch on the toolbar row, restock records in a modal and diagnostics export. Mocked IPC only; external requests blocked.');
 }finally{await browser.close();server.close();}

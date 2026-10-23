@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apw_core::config::{
-    ConfigError, DEFAULT_INTERVAL_SECONDS, MAX_SETTINGS_BYTES, Settings, SettingsStore,
+    ConfigError, DEFAULT_INTERVAL_SECONDS, MAX_SETTINGS_BYTES, MonitorMode, Settings, SettingsStore,
 };
 use apw_core::model::Target;
 
@@ -91,6 +91,7 @@ fn 样例设置() -> Settings {
         sound_enabled: false,
         open_bag_on_hit: true,
         proxies: Vec::new(),
+        monitor_mode: MonitorMode::Local,
     }
 }
 
@@ -501,11 +502,12 @@ fn 设置的线上格式是小驼峰() {
         "soundEnabled",
         "openBagOnHit",
         "proxies",
+        "monitorMode",
     ] {
         assert!(obj.contains_key(key), "缺少字段 {key}：{value}");
     }
     assert!(!obj.contains_key("interval_seconds"), "不该有蛇形字段");
-    assert_eq!(obj.len(), 8);
+    assert_eq!(obj.len(), 9);
 }
 
 #[test]
@@ -665,4 +667,26 @@ fn 填在bark一栏的飞书地址规范化后挪到飞书() {
     let once = s.clone();
     s.normalize();
     assert_eq!(s, once);
+}
+
+#[test]
+fn 库存来源默认云端_其他构建存的取值不让设置变成损坏() {
+    // 旧配置没有这个字段：按云端。
+    let old: Settings = serde_json::from_str(r#"{"locale":"zh_CN"}"#).unwrap();
+    assert_eq!(old.monitor_mode, MonitorMode::Cloud);
+    // 同一台电脑上的另一份构建可能存了 "manual" 之类这里没有的取值：按本机，整份设置照常读出。
+    for raw in ["manual", "something-new"] {
+        let s: Settings =
+            serde_json::from_str(&format!(r#"{{"locale":"zh_CN","monitorMode":"{raw}"}}"#))
+                .unwrap();
+        assert_eq!(s.monitor_mode, MonitorMode::Local, "{raw}");
+    }
+    let local = Settings {
+        monitor_mode: MonitorMode::Local,
+        ..Settings::default()
+    };
+    let wire = serde_json::to_value(&local).unwrap();
+    assert_eq!(wire["monitorMode"], "local");
+    let back: Settings = serde_json::from_value(wire).unwrap();
+    assert_eq!(back, local);
 }

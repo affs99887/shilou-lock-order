@@ -29,6 +29,9 @@ from platform_runtime import application_data_root, data_directory, lock_file
 DATA = data_directory()
 SHARED_LOCK = application_data_root() / 'PurchaseAssistantPreview/service.lock'
 
+# 外部来源的上报时间最多可以多旧（毫秒）：共享线索是汇总记录，云端查询是对方服务器上的结果。
+SOURCE_MAX_AGE = {'sunbelife_aggregate': 180000, 'vss_cloud': 90000}
+
 def plan_for_hit(plan, hit, now=None, *, rehearsal=False, manual=False):
     now = time.time() * 1000 if now is None else now
     stamp = hit.get('lastCheckedMs')
@@ -36,12 +39,18 @@ def plan_for_hit(plan, hit, now=None, *, rehearsal=False, manual=False):
         # Explicit community evidence follows a separate freshness rule. It is
         # never relabeled as confirmed inventory, and all plan/order gates below
         # still run before the first browser action and again after preflight.
+        # 云端结果按服务器时间算新鲜度，并且必须是明确有货；对方服务器的时钟可能比本机快一点。
+        source = hit.get('source')
+        cloud = source == 'vss_cloud'
+        skew = 30000 if cloud else 0
         reported, received = hit.get('reportedAtMs'), hit.get('receivedAtMs')
-        if (hit.get('source') != 'sunbelife_aggregate' or manual or
-            hit.get('target', {}).get('locale') != 'zh_CN' or
+        if (source not in SOURCE_MAX_AGE or manual or
+            (not cloud and hit.get('target', {}).get('locale') != 'zh_CN') or
+            (cloud and hit.get('availability', {}).get('kind') != 'in_stock') or
             type(reported) not in (int, float) or type(received) not in (int, float) or
-            not 0 <= now - reported <= 180000 or not 0 <= now - received <= 15000 or reported > received):
-            raise ValueError('共享到货线索无效或已过期；等待新的线索')
+            not -skew <= now - reported <= SOURCE_MAX_AGE[source] or not 0 <= now - received <= 15000 or
+            reported > received + skew):
+            raise ValueError('云端库存结果无效或已过期；等待新的查询' if cloud else '共享到货线索无效或已过期；等待新的线索')
     elif not rehearsal and (hit.get('availability', {}).get('kind') != 'in_stock' or
         (not manual and (type(stamp) not in (int, float) or not 0 <= now - stamp <= 15000))):
         raise ValueError('库存未知或已过期；等待新的有效查询')
@@ -615,6 +624,13 @@ class Bridge:
             return self.status()
         with self.mutex:
             if op == 'purchase' and (self.armed or self.reserved or self.stopping):
+                return self.status()
+            if op == 'prepare_switch':
+                # 切换库存来源前：有选购在跑或正在停止时不切；只在等库存时关掉自动选购。
+                if self.reserved or self.stopping:
+                    raise ValueError('正在选购或登录时不能切换库存来源；请先结束，等停止完成后再切换')
+                if self.armed:
+                    return self.request({'op': 'disarm'})
                 return self.status()
             if op in ('stop', 'disarm'):
                 self.armed = False

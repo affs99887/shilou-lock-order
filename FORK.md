@@ -46,6 +46,17 @@ A manual start or rehearsal while auto checkout waits pauses auto checkout and
 resumes it when that single run ends, unless the run reached the review page,
 an order result is unverified, or Apple refused access. A definite sold-out,
 over-budget or not-yet-released result ends a single run without a stop click.
+Stock can come from two sources, chosen on the toolbar: cloud (default) reads
+the v-ss.me iPhone stock page in a hidden window, so the local network does not
+poll Apple; local polls Apple directly as before. Only one runs at a time and
+neither falls back to the other. Cloud results count only when store, region and
+SKU match, the server timestamp is at most 90 s old and the row explicitly says
+available; auto checkout additionally requires the result to have been received
+within 15 s. Switching stops monitoring, clears results and refuses while a run
+or sign-in is in progress. Remote pages cannot call app commands. A bounded
+local journal (8 x 8 MB, no accounts, cookies, headers or checkout data) keeps
+query records and up to 500 restock episodes, shown as restock records and
+exportable to the Downloads folder.
 A page-not-found (404) during checkout reopens the cart entry of the app's own
 tab twice (after 1 s and 3 s); removals and adds are never replayed, and a
 post-add reopen allows one more checkout click. If both reopens fail, a single

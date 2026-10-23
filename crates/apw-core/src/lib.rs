@@ -21,6 +21,7 @@
 pub mod apple;
 pub mod apple_catalog;
 pub mod catalog;
+pub mod cloud;
 pub mod community;
 pub mod config;
 pub mod model;

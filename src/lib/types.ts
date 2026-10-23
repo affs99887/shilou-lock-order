@@ -79,6 +79,12 @@ export interface Store {
   title: string;
 }
 
+/**
+ * 库存来源，与 Rust 侧 `config::MonitorMode` 对应。
+ * 云端：通过 v-ss.me 的网页查询，本机网络不向 Apple 查库存；本机：用这台电脑的网络直接查 Apple。
+ */
+export type MonitorMode = "cloud" | "local";
+
 export interface Settings {
   locale: string;
   targets: Target[];
@@ -90,6 +96,42 @@ export interface Settings {
   openBagOnHit: boolean;
   /** 代理地址列表；每个代理是一条额外的出口线路，被拦时切换。可为空。 */
   proxies: string[];
+  monitorMode: MonitorMode;
+}
+
+/**
+ * 云端查询的一条记录（Rust 侧 `cloud_bridge` 发出），只列界面用得到的字段。
+ * `origin` 为 vss 是对方服务器的答复，为 local 是本机这边的准备或连接错误。
+ */
+export interface CloudEvent {
+  origin?: "vss" | "local";
+  stage?: string;
+  atMs?: number;
+  store?: string;
+  locale?: string;
+  parts?: string[];
+  outcome?: "checked" | "rate_limited" | "too_frequent" | "unconfirmed";
+  counts?: { total: number; inStock: number; outOfStock: number; unconfirmed: number };
+  message?: string;
+}
+
+/** 一次补货，与 Rust 侧 `diagnostics::RestockRow` 对应。 */
+export interface RestockRecord {
+  key: string;
+  storeTitle: string;
+  productName: string;
+  foundAtMs: number;
+  lastInStockMs: number;
+  endedAtMs: number | null;
+  currentStatus: string;
+  checkedAtMs: number | null;
+}
+
+/** 导出诊断记录的结果；有漏记或写盘出错时记录不完整。 */
+export interface DiagnosticsExport {
+  directory: string;
+  droppedRecords: number;
+  writeError: string | null;
 }
 
 export interface CommunityStatus {
@@ -169,7 +211,7 @@ export type StatusTone = "inStock" | "outOfStock" | "unknown" | "pending";
  * 要用醒目的方式呈现；后者只是还没轮到，弱化即可。上游把这两种和「无货」
  * 全糊成一种显示，用户无从分辨程序是在正常工作还是已经废了。
  */
-export function describeAvailability(a: Availability): {
+export function describeAvailability(a: Availability, source: MonitorMode = "local"): {
   label: string;
   tone: StatusTone;
   detail: string | null;
@@ -180,17 +222,21 @@ export function describeAvailability(a: Availability): {
     case "out_of_stock":
       return { label: "无货", tone: "outOfStock", detail: null };
     case "unknown":
-      return describeUnknown(a);
+      return describeUnknown(a, source);
     default:
       return assertNever(a);
   }
 }
 
-function describeUnknown(a: { kind: "unknown" } & UnknownReason): {
+function describeUnknown(a: { kind: "unknown" } & UnknownReason, source: MonitorMode): {
   label: string;
   tone: StatusTone;
   detail: string;
 } {
+  // 云端限流是对方服务器在限，不是 Apple，也不会拉长间隔。
+  if (source === "cloud" && a.reason === "rate_limited") {
+    return { label: "未知", tone: "unknown", detail: "云端查询正在限流或冷却，库存未确认；下一轮会再查。" };
+  }
   switch (a.reason) {
     case "not_yet_checked":
       return { label: "待查询", tone: "pending", detail: "尚未轮到这一项" };

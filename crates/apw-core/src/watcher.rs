@@ -111,6 +111,9 @@ pub struct WatcherConfig {
     /// 上游写死 500 毫秒一轮，即每个门店每秒两次请求。这个频率对一个公开的
     /// 商品查询接口来说过高，是触发风控的直接原因。
     pub interval: Duration,
+    /// 整轮全败时是否拉长间隔。直连 Apple 要拉长，免得被拦后还按原频率猛冲；
+    /// 云端查询有自己的限速，拉长只会让结果更旧，所以关掉。
+    pub failure_backoff: bool,
     /// 间隔抖动比例（0 到 1）。固定周期本身就是机器人特征。
     pub jitter: f64,
     /// 同一轮内并发查询的门店数上限。
@@ -123,6 +126,7 @@ impl Default for WatcherConfig {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(30),
+            failure_backoff: true,
             jitter: 0.2,
             concurrency: 4,
             event_buffer: 256,
@@ -520,7 +524,8 @@ fn trouble_for(err: &ApiError, label: &str) -> Option<TroubleReport> {
         }),
         ApiError::RateLimited(detail) => Some(TroubleReport {
             // 这一类也承载 HTTP 5xx；保留状态码，不能一概断言查询太频繁。
-            reason: format!("{label} 查询暂时不可用：{detail}，将退避后重试"),
+            // 云端查询不拉长间隔，所以只说稍后重试。
+            reason: format!("{label} 查询暂时不可用：{detail}，稍后重试"),
             advice: None,
         }),
         ApiError::Transport(_) => None,
@@ -1072,7 +1077,7 @@ impl<F: Fetcher> Engine<F> {
 
         // 整轮全败时逐步拉长间隔，最多放大到 8 倍。被拦截还按原频率猛冲，
         // 只会让风控更严。
-        if self.cycle_failures > 0 {
+        if self.config.failure_backoff && self.cycle_failures > 0 {
             let factor = 1u32 << self.cycle_failures.min(3);
             base = base.saturating_mul(factor);
         }

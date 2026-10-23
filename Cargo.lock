@@ -131,6 +131,7 @@ version = "0.6.2"
 dependencies = [
  "apw-core",
  "dirs",
+ "rand 0.9.5",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

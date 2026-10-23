@@ -703,6 +703,8 @@ pub struct AppleClient {
     last_sent: Arc<Mutex<Option<Instant>>>,
     /// 最近的出站请求记录。
     recent: Arc<Mutex<VecDeque<RequestRecord>>>,
+    /// 每条请求记录也发给订阅者（诊断日志）；订阅者跟不上时会收到漏掉的条数。
+    request_events: tokio::sync::broadcast::Sender<RequestRecord>,
 }
 
 impl AppleClient {
@@ -714,6 +716,7 @@ impl AppleClient {
             config,
             last_sent: Arc::new(Mutex::new(None)),
             recent: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_RECORDS))),
+            request_events: tokio::sync::broadcast::channel(256).0,
         })
     }
 
@@ -780,7 +783,13 @@ impl AppleClient {
         self.recent.lock().await.iter().cloned().collect()
     }
 
+    /// 订阅之后的每条请求记录。没有订阅者时发送失败是正常的，直接忽略。
+    pub fn subscribe_requests(&self) -> tokio::sync::broadcast::Receiver<RequestRecord> {
+        self.request_events.subscribe()
+    }
+
     async fn push_record(&self, record: RequestRecord) {
+        let _ = self.request_events.send(record.clone());
         let mut recent = self.recent.lock().await;
         if recent.len() >= RECENT_RECORDS {
             recent.pop_front();

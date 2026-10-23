@@ -16,9 +16,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Category,
   CategoryOption,
+  CloudEvent,
   CommunityStatus,
+  DiagnosticsExport,
+  MonitorMode,
   Product,
   Region,
+  RestockRecord,
   Settings,
   Store,
   Target,
@@ -28,6 +32,7 @@ import type {
   WatcherEvent,
 } from "./types";
 import { assertNever, describeAvailability, isUntrusted } from "./types";
+import { cloudLogLine } from "./status-text";
 
 const EVENT_CHANNEL = "watcher://event";
 const NOTICE_CHANNEL = "watcher://notice";
@@ -65,6 +70,8 @@ export interface UiState {
   update: UpdateInfo | null;
   /** 正在下载安装更新。 */
   installing: boolean;
+  /** 正在切换库存来源。 */
+  switching: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -76,6 +83,7 @@ const DEFAULT_SETTINGS: Settings = {
   soundEnabled: false,
   openBagOnHit: true,
   proxies: [],
+  monitorMode: "cloud",
 };
 
 let state: UiState = {
@@ -95,6 +103,7 @@ let state: UiState = {
   ready: false,
   update: null,
   installing: false,
+  switching: false,
 };
 
 const listeners = new Set<() => void>();
@@ -135,8 +144,9 @@ function applyEvent(event: WatcherEvent): void {
       // 列表本身以 cycleComplete 带来的快照为准，不拿这条事件去增量改 ——
       // 它是可丢弃的，用它做增量会让界面和引擎慢慢对不上。
       // 保留后端的失败分类与诊断详情，避免把冷却或限流伪装成仍在查询。
+      // 云端的失败已按门店写进了云端记录，这里不再逐个型号重复写。
       const { availability, target } = event.state;
-      if (isUntrusted(availability)) {
+      if (isUntrusted(availability) && state.settings.monitorMode !== "cloud") {
         const { detail } = describeAvailability(availability);
         pushLog(`${target.storeTitle} ${target.productName}：${detail ?? "查询失败"}`);
       }
@@ -173,6 +183,8 @@ function applyEvent(event: WatcherEvent): void {
       break;
 
     case "runStateChanged":
+      // 重新开始后，每家门店的第一条云端结果照常写进日志。
+      if (event.running) lastCloudLine.clear();
       update({ running: event.running, pacing: event.running ? state.pacing : null });
       pushLog(event.running ? "已开始监控。" : "已暂停监控。");
       break;
@@ -184,6 +196,19 @@ function applyEvent(event: WatcherEvent): void {
 
 let unlisteners: UnlistenFn[] = [];
 let starting: Promise<void> | null = null;
+
+// 每家门店上一次写进日志的云端结果；结果没变就不再写，免得每轮都刷一遍同样的话。
+const lastCloudLine = new Map<string, string>();
+
+function applyCloudEvent(event: CloudEvent): void {
+  if (state.settings.monitorMode !== "cloud" || !event.store) return;
+  const row = state.rows.find(r => r.target.storeNumber === event.store && r.target.locale === event.locale);
+  const line = cloudLogLine(event, row?.target.storeTitle ?? event.store);
+  const key = `${event.locale}|${event.store}`;
+  if (line === null || lastCloudLine.get(key) === line) return;
+  lastCloudLine.set(key, line);
+  pushLog(line);
+}
 
 function applyCommunityStatus(community: CommunityStatus): void {
   const previous = state.community;
@@ -214,6 +239,7 @@ export function connect(): Promise<void> {
         communityEventReceived = true;
         applyCommunityStatus(e.payload);
       }),
+      listen<CloudEvent>("cloud://event", (e) => applyCloudEvent(e.payload)),
     ]);
 
     const [regions, categories, settings, rows, running] = await Promise.all([
@@ -329,6 +355,42 @@ export async function setTargets(targets: Target[]): Promise<void> {
 
 export async function startWatching(): Promise<void> {
   await invoke("start_watching");
+}
+
+/**
+ * 切换库存来源。后端会先停下监测、清空两边的库存结果，目标和选购方案保留；
+ * 之后点「开始监测」或「启用有货自动选购」才重新查。
+ */
+export async function setMonitorMode(mode: MonitorMode): Promise<void> {
+  if (state.switching || mode === state.settings.monitorMode) return;
+  update({ switching: true });
+  try {
+    const saved = await invoke<Settings>("set_monitor_mode", { mode });
+    const rows = await invoke<TargetState[]>("get_snapshot");
+    lastCloudLine.clear();
+    update({ settings: saved, rows, running: false, trouble: null, pacing: null });
+    pushLog(mode === "cloud" ? "库存来源已切换为云端，点开始监测后查询。" : "库存来源已切换为本机网络，点开始监测后查询。");
+  } catch (err) {
+    pushLog(`切换库存来源失败：${String(err)}`);
+  } finally {
+    update({ switching: false });
+  }
+}
+
+/** 补货记录，新的在前。读不出来时抛出错误，由界面显示。 */
+export async function loadRestockRecords(): Promise<RestockRecord[]> {
+  return invoke<RestockRecord[]>("get_restock_records");
+}
+
+/** 导出诊断记录，结果写进查询日志。 */
+export async function exportDiagnostics(): Promise<void> {
+  try {
+    const result = await invoke<DiagnosticsExport>("export_monitor_diagnostics");
+    const partial = result.writeError || result.droppedRecords > 0 ? "部分记录没能保存，排查时请一并说明。" : "";
+    pushLog(`诊断记录已导出到 ${result.directory}。${partial}`);
+  } catch (err) {
+    pushLog(`导出诊断记录失败：${String(err)}`);
+  }
 }
 
 export async function stopWatching(): Promise<void> {

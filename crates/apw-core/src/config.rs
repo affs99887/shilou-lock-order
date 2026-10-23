@@ -153,6 +153,31 @@ pub struct Settings {
     /// 切换（见 [`crate::apple::ClientConfig::proxies`]）。只保留能解析、协议为
     /// http / https / socks5 / socks5h 的地址。
     pub proxies: Vec<String>,
+    /// 库存从哪里查。旧配置没有这个字段时按云端。
+    pub monitor_mode: MonitorMode,
+}
+
+/// 库存的查询来源。
+///
+/// 云端：通过 v-ss.me 的网页查询，本机网络不向 Apple 查库存，留给选购用的浏览器；
+/// 本机：用这台电脑的网络直接查 Apple。两者互斥，查不到时不自动换到另一个。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorMode {
+    #[default]
+    Cloud,
+    Local,
+}
+
+impl<'de> Deserialize<'de> for MonitorMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // 同一台电脑上的另一份构建可能存了这里没有的取值（如 "manual"，不监控）。
+        // 按本机处理，不能因为这一个字段让整份设置被当成损坏。
+        Ok(match String::deserialize(deserializer)?.as_str() {
+            "cloud" => Self::Cloud,
+            _ => Self::Local,
+        })
+    }
 }
 
 /// 内置地区表里的第一个 locale，作为兜底取值。
@@ -173,6 +198,7 @@ impl Default for Settings {
             sound_enabled: true,
             open_bag_on_hit: true,
             proxies: Vec::new(),
+            monitor_mode: MonitorMode::default(),
         }
     }
 }
@@ -684,6 +710,7 @@ impl LegacySettings {
             open_bag_on_hit: self.open_bag_on_hit.unwrap_or(fallback.open_bag_on_hit),
             // Go 版没有代理设置，迁移过来的文件一律从空开始。
             proxies: fallback.proxies,
+            monitor_mode: fallback.monitor_mode,
         };
         settings.normalize();
         settings

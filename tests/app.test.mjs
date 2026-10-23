@@ -145,6 +145,7 @@ test("blocked monitoring exposes the error and cooldown without pretending to qu
 
 test("pending and failed inventory remain distinguishable with their actual reasons", () => {
   const app = renderApp();
+  app.state.settings.monitorMode = "local";
   const cases = [
     [{ reason: "not_yet_checked" }, "尚未轮到这一项"],
     [{ reason: "blocked", detail: "HTTP 403" }, "请求被 Apple 拦截：HTTP 403"],
@@ -174,6 +175,14 @@ test("pending and failed inventory remain distinguishable with their actual reas
     assert.equal(app.all(e => e.props?.label === "查询异常").length, pending ? 0 : 1);
     assert.equal(app.state.rows[0].availability.kind, "unknown");
   }
+  // 云端来源时，限流是对方服务器在限，不说成 Apple，也不说会延长间隔。
+  app.state.settings.monitorMode = "cloud";
+  app.state.rows = [{
+    target: { locale: "zh_CN", storeNumber: "R575", storeTitle: "Apple 武汉", partNumber: "TEST", productName: "演练型号" },
+    availability: { kind: "unknown", reason: "rate_limited" }, lastCheckedMs: null,
+  }];
+  const node = app.all(e => typeof e.type === "function" && e.type.name === "StatusBadge")[0];
+  assert.equal(node.type(node.props).props.children[1].props.children, "云端查询正在限流或冷却，库存未确认；下一轮会再查。");
 });
 
 test("budget pacing is identified separately from query failures", () => {
@@ -410,4 +419,33 @@ test("the add button stays disabled until at least one store is selected", () =>
   assert.equal(app.addButton().disabled, true);
   app.choice("选择自提门店").onChange(["R532"]);
   assert.equal(app.addButton().disabled, false);
+});
+
+test("the stock source switch shows the current source and locks while switching", () => {
+  const app = renderApp();
+  app.state.ready = true;
+  for (const mode of ["cloud", "local"]) {
+    app.state.settings.monitorMode = mode;
+    const group = app.all(e => typeof e.type === "function" && e.type.name === "SourceSwitch")[0];
+    assert.equal(group.props.mode, mode);
+    const buttons = group.type(group.props).props.children[1];
+    assert.deepEqual(buttons.map(b => [b.props.children, b.props["aria-pressed"]]),
+      [["云端", mode === "cloud"], ["本机", mode === "local"]]);
+  }
+  app.state.rows = [{ target: { locale: "zh_CN", storeNumber: "R575", storeTitle: "Apple 武汉", partNumber: "TEST", productName: "演练型号" },
+    availability: { kind: "unknown", reason: "not_yet_checked" }, lastCheckedMs: null }];
+  assert.ok(!app.control(e => e.props?.className === "monitor-toggle").disabled);
+  app.state.switching = true;
+  const group = app.all(e => typeof e.type === "function" && e.type.name === "SourceSwitch")[0];
+  assert.equal(group.props.disabled, true);
+  assert.equal(app.control(e => e.props?.className === "monitor-toggle").disabled, true, "切换途中不能开始监测");
+});
+
+test("restock records and diagnostics export sit in the log header without folding the logs", () => {
+  const app = renderApp();
+  const restock = app.control(e => e.props?.["aria-controls"] === "restock-records");
+  assert.equal(restock["aria-haspopup"], "dialog");
+  assert.ok(app.all(e => e.props?.id === "restock-records" && e.props?.title === "补货记录").length === 1);
+  assert.ok(app.all(e => typeof e.props?.title === "string" && e.props.title.includes("不含账号")).length === 1);
+  assert.equal(app.all(e => e.props?.["aria-controls"] === "query-logs").length, 0);
 });

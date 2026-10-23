@@ -183,6 +183,7 @@ fn target(store: &str, part: &str) -> Target {
 fn fast_config() -> WatcherConfig {
     WatcherConfig {
         interval: Duration::from_millis(20),
+        failure_backoff: true,
         jitter: 0.0,
         concurrency: 4,
         event_buffer: 256,
@@ -235,7 +236,7 @@ async fn 限流与服务异常保留状态码并继续退避() {
         w.stop().await;
         assert!(events.iter().any(|event| matches!(
             event, Event::Trouble { reason, advice: None }
-                if reason.contains(&format!("HTTP {code}")) && reason.contains("退避")
+                if reason.contains(&format!("HTTP {code}")) && reason.contains("稍后重试")
         )));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -1262,4 +1263,30 @@ async fn 暂未开放到店取货时不退避也不告警但仍是未知() {
     let (next, trouble, _) = first_cycle_with("something-new").await;
     assert_eq!(next, 2, "整店都认不出来时应当退避");
     assert!(trouble, "整店都认不出来时应当告警");
+}
+
+#[tokio::test]
+async fn 关掉失败拉长后整轮失败也按原间隔查() {
+    // 云端查询用这个开关：对方有自己的限速，拉长间隔只会让结果更旧。
+    let fake = FakeFetcher::new(|_, _, _| Err(ApiError::RateLimited("云端冷却".into())));
+    let (w, mut rx) = Watcher::spawn(
+        fake,
+        WatcherConfig {
+            interval: Duration::from_secs(60),
+            failure_backoff: false,
+            ..fast_config()
+        },
+    );
+    w.set_targets(vec![target("R359", "TEST")]).await;
+    w.start().await;
+    let events = wait_cycle(&mut rx).await;
+    w.stop().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::CycleComplete {
+            healthy: false,
+            next_check_in_secs: 60,
+            ..
+        }
+    )));
 }

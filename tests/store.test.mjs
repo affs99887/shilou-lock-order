@@ -40,7 +40,8 @@ function setup() {
   });
   return { ...store, snapshot: store.watcherStore.getSnapshot, calls, handlers,
     emit: payload => events.get("watcher://event")({ payload }),
-    emitCommunity: payload => events.get("community://status")({ payload }) };
+    emitCommunity: payload => events.get("community://status")({ payload }),
+    emitCloud: payload => events.get("cloud://event")({ payload }) };
 }
 
 async function monitoringApp() {
@@ -90,6 +91,7 @@ test("a delayed shared-status snapshot cannot overwrite a newer background event
 
 test("blocked events preserve the cause, cooldown and unknown stock until a healthy cycle", async () => {
   const app = await monitoringApp();
+  await app.saveSettings({ ...app.snapshot().settings, monitorMode: "local" });
   const detail = "HTTP 541；直连已进入冷却，5 分钟后自动重试一次";
   const trouble = { reason: `查询失败：${detail}`, advice: "try_another_network" };
   const row = { target: { storeTitle: "示例门店", productName: "示例型号" },
@@ -269,4 +271,60 @@ test("a failed refresh still reloads the current catalog to expose partial backe
   assert.deepEqual(app.snapshot().products, catalog("zh_CN", "partial").products);
   assert.equal(app.snapshot().refreshing, false);
   assert.match(app.snapshot().logs.at(-1), /更新型号列表失败.*one page failed/);
+});
+
+test("cloud results are logged once per store until they change, without repeating per-model failures", async () => {
+  const app = await monitoringApp();
+  assert.equal(app.snapshot().settings.monitorMode, "cloud");
+  const row = { target: { locale: "zh_CN", storeNumber: "R575", storeTitle: "Apple 武汉", productName: "示例型号", partNumber: "A" },
+    availability: { kind: "unknown", reason: "rate_limited" } };
+  app.emit({ type: "cycleComplete", healthy: false, snapshot: [row], nextCheckInSecs: 60, paced: false });
+  const before = app.snapshot().logs.length;
+  app.emit({ type: "stateChanged", state: row });
+  assert.equal(app.snapshot().logs.length, before, "云端失败已按门店写过，不再逐个型号写");
+  app.emitCloud({ origin: "local", stage: "request", store: "R575", locale: "zh_CN", parts: ["A"] });
+  assert.equal(app.snapshot().logs.length, before, "准备查询那条不写");
+  const checked = { origin: "vss", stage: "response", store: "R575", locale: "zh_CN", parts: ["A", "B"], outcome: "checked",
+    counts: { total: 2, inStock: 0, outOfStock: 2, unconfirmed: 0 } };
+  app.emitCloud(checked);
+  assert.match(app.snapshot().logs.at(-1), /云端 · Apple 武汉：所选 2 款都暂无自提现货/);
+  app.emitCloud(checked);
+  assert.equal(app.snapshot().logs.length, before + 1, "结果没变不重复写");
+  app.emitCloud({ ...checked, outcome: "rate_limited", counts: undefined });
+  assert.match(app.snapshot().logs.at(-1), /对方正在限流，库存未确认/);
+  app.emitCloud({ ...checked, counts: { total: 2, inStock: 1, outOfStock: 0, unconfirmed: 1 } });
+  assert.match(app.snapshot().logs.at(-1), /1 款有货，1 款未确认/);
+  app.emit({ type: "runStateChanged", running: true });
+  app.emitCloud({ ...checked, counts: { total: 2, inStock: 1, outOfStock: 0, unconfirmed: 1 } });
+  assert.match(app.snapshot().logs.at(-1), /1 款有货/, "重新开始后同样的结果照常写一次");
+  app.disconnect();
+});
+
+test("switching the stock source refreshes rows and reports failures without leaving the switch locked", async () => {
+  const app = await monitoringApp();
+  const saved = { ...app.snapshot().settings, monitorMode: "local" };
+  app.handlers.set_monitor_mode = args => { assert.equal(args.mode, "local"); return saved; };
+  app.handlers.get_snapshot = () => [];
+  await app.setMonitorMode("local");
+  assert.equal(app.snapshot().settings.monitorMode, "local");
+  assert.equal(app.snapshot().running, false);
+  assert.equal(app.snapshot().switching, false);
+  assert.match(app.snapshot().logs.at(-1), /库存来源已切换为本机网络/);
+  app.handlers.set_monitor_mode = () => { throw new Error("正在选购或登录时不能切换库存来源"); };
+  await app.setMonitorMode("cloud");
+  assert.equal(app.snapshot().settings.monitorMode, "local");
+  assert.equal(app.snapshot().switching, false);
+  assert.match(app.snapshot().logs.at(-1), /切换库存来源失败.*正在选购/);
+  app.disconnect();
+});
+
+test("diagnostics export reports the folder and whether some records were lost", async () => {
+  const app = await monitoringApp();
+  app.handlers.export_monitor_diagnostics = () => ({ directory: "D:/下载/拾漏锁单诊断-1", droppedRecords: 0, writeError: null });
+  await app.exportDiagnostics();
+  assert.match(app.snapshot().logs.at(-1), /诊断记录已导出到 D:\/下载\/拾漏锁单诊断-1。$/);
+  app.handlers.export_monitor_diagnostics = () => ({ directory: "D:/x", droppedRecords: 3, writeError: null });
+  await app.exportDiagnostics();
+  assert.match(app.snapshot().logs.at(-1), /部分记录没能保存/);
+  app.disconnect();
 });

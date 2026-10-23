@@ -19,7 +19,27 @@ def community_hit():
     h.update(source='sunbelife_aggregate', reportedAtMs=90000, receivedAtMs=100000)
     return h
 
+def cloud_hit():
+    """云端查到的有货：带对方服务器给的时间和本机收到的时间。"""
+    h = hit()
+    h.update(source='vss_cloud', reportedAtMs=50000, receivedAtMs=100000)
+    return h
+
 class CandidateTests(unittest.TestCase):
+    def test_cloud_hit_uses_server_time_and_needs_confirmed_stock(self):
+        h = cloud_hit()
+        self.assertEqual(plan_for_hit(DEFAULTS, h, now=100000)['store_id'], STORES[0]['id'])
+        # 服务器时间 90 秒内都算新鲜；对方时钟比本机快一点（30 秒内）也接受。
+        for reported in (10000, 125000):
+            plan_for_hit(DEFAULTS, dict(h, reportedAtMs=reported), now=100000)
+        for field, value in [('reportedAtMs', 9999), ('reportedAtMs', 130001), ('reportedAtMs', None),
+                             ('receivedAtMs', 84999), ('receivedAtMs', 100001), ('receivedAtMs', None)]:
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, '云端'):
+                plan_for_hit(DEFAULTS, dict(h, **{field: value}), now=100000)
+        with self.assertRaisesRegex(ValueError, '云端'):
+            plan_for_hit(DEFAULTS, dict(h, availability={'kind': 'unknown', 'reason': 'rate_limited'}), now=100000)
+        with self.assertRaises(ValueError):
+            plan_for_hit(DEFAULTS, h, now=100000, manual=True)
     def test_community_hint_preserves_mapping_and_does_not_claim_confirmed_stock(self):
         h = community_hit()
         self.assertEqual(plan_for_hit(DEFAULTS, h, now=100001)['store_id'], STORES[0]['id'])
@@ -128,6 +148,26 @@ class BridgeTests(unittest.TestCase):
         self.b.order_guard.begin()
         with self.assertRaises(ValueError):self.b.request({'op':'purchase','hit':hit(),'confirmSubmission':True})
         self.assertTrue(self.b.tasks.empty())
+
+    def test_switching_stock_source_disarms_only_an_idle_wait(self):
+        self.b.armed = True; self.b.submission_confirmed = True
+        s = self.b.request({'op': 'prepare_switch'})
+        self.assertFalse(s['armed'])
+        self.assertFalse(s['submissionEnabled'])
+        self.assertTrue(self.b.tasks.empty())
+        for field in ('reserved', 'stopping'):
+            setattr(self.b, field, True)
+            with self.assertRaises(ValueError):
+                self.b.request({'op': 'prepare_switch'})
+            self.assertTrue(getattr(self.b, field), '正在进行的选购不受切换影响')
+            setattr(self.b, field, False)
+
+    @patch('worker.time.time', return_value=100)
+    def test_cloud_offer_is_queued_like_confirmed_stock(self, _):
+        self.b.armed = True
+        self.b.request({'op': 'offer', 'hits': [cloud_hit()]})
+        _, op, h = self.b.tasks.get_nowait()
+        self.assertEqual((op, h['source']), ('start', 'vss_cloud'))
 
     def test_offer_disarmed_no_task(self):
         self.b.request({'op':'offer','hits':[hit()]})
