@@ -146,7 +146,8 @@ class Checkout(core.Service):
                            "不折抵换购","不加 AppleCare+ 服务计划","applecare_add",
                            "method_pickup","method_delivery","store","payment",
                            "continue_FULFILLMENT","continue_CONTACT","continue_PAYMENT",
-                           "review_edit_fulfillment","review_edit_contact","review_edit_payment"}
+                           "review_edit_fulfillment","review_edit_contact","review_edit_payment",
+                           "bag_recheck"}
         fixed_actions = {
             "清空购物袋：移除一项（可重新加购）": "remove_cart_item",
             "official_installment_payment_0": "installment_provider",
@@ -304,6 +305,10 @@ class Checkout(core.Service):
                 'captcha' if snapshot.get('stage')=='CAPTCHA' else
                 'expired' if snapshot.get('stage')=='SESSION_EXPIRED' else
                 'not_found' if snapshot.get('stage')=='NOT_FOUND' else None)
+        if kind == 'not_found' and self.phase == 'CLEAR_BAG' and self.pending_remove:
+            # clear_tick first decides whether its one cart read-back is still
+            # available. A real stop calls attention/notify in the same tick.
+            return
         if kind:self.require_user_action(kind)
         elif ((self.status.get('intervention') or {}).get('kind') in ('login','privacy','phone','captcha') or
               (snapshot.get('stage') in ('PRODUCT','BAG','FULFILLMENT','CONTACT','PAYMENT','REVIEW') and
@@ -350,6 +355,10 @@ class Checkout(core.Service):
     def event(self, kind, reason='', **extra):
         if kind == 'action':
             self.record_diagnostic("ACTION", action=reason, result=extra.get('result', ''))
+        elif kind == 'bag_recheck':
+            self.record_diagnostic("ACTION", action='bag_recheck')
+            self.update(intervention=None)
+            self.last_handoff = None
         # 手动开始没货时要照常提醒本人，不走「等下一次有货再换目标」那条静默结束的路。
         if kind in ('sold_out', 'over_budget') and self.owner.automatic and not getattr(self.owner, 'manual_run', False):
             self.owner.retryable_end = True
@@ -374,6 +383,11 @@ class Checkout(core.Service):
             return super().preflight(fresh)
 
     def clear_tick(self, snapshot, now):
+        if self.owner.cancel.is_set():
+            return
+        if self.owner.order_guard.blocked:
+            self.attention('上次下单结果尚未核对；保留购物袋，不重新移除或加购')
+            return
         if snapshot.get('stage') == 'BAG':
             if snapshot.get('errors'):
                 self.attention('购物袋存在官网校验错误；已暂停，未移除商品或重新加购')

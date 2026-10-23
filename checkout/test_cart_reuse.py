@@ -26,6 +26,7 @@ class CartReuseTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.bridge = Bridge(data=Path(self.temp.name))
+        self.bridge.cancel.clear()
         self.service = self.bridge.service
         self.service.preferences.update(
             model='iphone-18-pro', colors=['冰川蓝色'], capacities=['256GB'],

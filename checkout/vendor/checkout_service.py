@@ -1234,16 +1234,28 @@ class Service:
         elif now - self.phase_since > 30 and self.attempt.started is None:
             self.attention("页面加载或识别超过 30 秒；未开始购买计时")
 
+    def recheck_bag(self, reason):
+        # Share one read-back allowance with delayed removal responses. Keep
+        # the original count and deadline even if navigation fails.
+        old_count, sent, _ = self.pending_remove
+        self.pending_remove = (old_count, sent, True)
+        self.browser.navigate("https://www.apple.com.cn/shop/bag")
+        self.event("bag_recheck", reason)
+        self.update(mode="running", stage="LOADING", reason=reason)
+
     def clear_tick(self, s, now):
-        if s.get("stage") == "NOT_FOUND":
-            if self.pending_remove:
-                self.attention("移除购物袋商品后官网返回 404；移除结果未确认，已停止，不会重复移除或加购")
-            else:
-                self.attention("购物袋入口被重定向至 404；未执行移除或加购，需核对官网入口")
-            return
         if now - self.phase_since > 30:
             self.attention("购物袋移除结果超过 30 秒仍未确认；保留现场，不重复移除或加购" if self.pending_remove else
                            "购物袋页面超过 30 秒仍未完成识别；未启动购买")
+            return
+        if s.get("stage") == "NOT_FOUND":
+            if self.pending_remove:
+                if not self.pending_remove[2]:
+                    self.recheck_bag("移除后官网显示找不到页面；重新读取购物袋核实一次，不重复移除")
+                else:
+                    self.attention("重新读取购物袋后仍显示找不到页面；移除结果未确认，已暂停，不重复移除或加购")
+            else:
+                self.attention("购物袋入口显示找不到页面；未执行移除或加购，需核对官网入口")
             return
         if s.get("stage") != "BAG":
             return
@@ -1254,16 +1266,13 @@ class Service:
         items = s.get("items", [])
         if not items:
             return  # Unknown markup is not proof of an empty bag.
-        fingerprint = s["fingerprint"]
         if self.pending_remove:
             old_count, sent, checked = self.pending_remove
             if len(items) >= old_count:
                 if now - sent > 5 and not checked:
                     # A delayed response is not proof that deletion failed.
                     # Re-read server cart once; NEVER repeat the remove click.
-                    self.pending_remove = (old_count, sent, True)
-                    self.event("bag_recheck", "移除响应延迟，重新读取购物袋核实；不重复移除")
-                    self.browser.navigate("https://www.apple.com.cn/shop/bag")
+                    self.recheck_bag("移除响应延迟，重新读取购物袋核实一次；不重复移除")
                 return
         item = items[0]
         if not item.get("remove_ref"):
