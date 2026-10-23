@@ -1,4 +1,5 @@
 //! Background shared hints. Independent of window visibility and Apple polling.
+use std::collections::BTreeMap;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -129,8 +130,22 @@ fn checkout_result(
     }
 }
 
+/// 只有回执明确写着「本批选中了这一条」，才算这条线索被自动选购接下。
+fn accepted(response: Option<&serde_json::Value>, index: usize, count: usize) -> bool {
+    response
+        .and_then(|value| value.get("offer"))
+        .is_some_and(|receipt| {
+            receipt["outcome"].as_str() == Some("queued")
+                && receipt["selectedIndex"]
+                    .as_u64()
+                    .is_some_and(|selected| selected < count as u64 && selected == index as u64)
+        })
+}
+
 pub async fn run(app: AppHandle, mut control: watch::Receiver<ControlState>, client: Client) {
     let mut matcher = Matcher::default();
+    // 每条线索（目标 → 上报时间）第一次出现时才提醒，重试时不重复推送。
+    let mut announced: BTreeMap<String, u64> = BTreeMap::new();
     let mut status = Status::default();
     let mut failures: u32 = 0;
     let (notifications, pending) = crate::notification_queue::channel();
@@ -172,6 +187,8 @@ pub async fn run(app: AppHandle, mut control: watch::Receiver<ControlState>, cli
             continue;
         }
         let now = now_ms();
+        announced
+            .retain(|_, stamp| now.saturating_sub(*stamp) <= apw_core::community::MAX_AGE_MS * 2);
         let result = result.and_then(|report| {
             matcher.collect(
                 &report,
@@ -189,6 +206,11 @@ pub async fn run(app: AppHandle, mut control: watch::Receiver<ControlState>, cli
                     status.last_signal = Some(signal.clone());
                 }
                 if !signals.is_empty() {
+                    // 没被接下的线索下一轮会再次出现；只有第一次出现时才提醒、写日志。
+                    let new: Vec<bool> = signals
+                        .iter()
+                        .map(|s| announced.get(&s.target.key().0) != Some(&s.reported_at_ms))
+                        .collect();
                     // This private protocol retains the worker's armed, budget,
                     // freshness, reservation and persistent order protections.
                     let handle = app.clone();
@@ -206,7 +228,7 @@ pub async fn run(app: AppHandle, mut control: watch::Receiver<ControlState>, cli
                             .request(serde_json::json!({"op":"offer", "hits":hits}))
                     })
                     .await;
-                    if !matches!(offered, Ok(Ok(_))) {
+                    if !matches!(offered, Ok(Ok(_))) && new.iter().any(|n| *n) {
                         let _ = app.emit(
                             crate::NOTICE_CHANNEL,
                             "共享线索已命中，但选购组件未确认接收，请查看选购状态",
@@ -221,6 +243,15 @@ pub async fn run(app: AppHandle, mut control: watch::Receiver<ControlState>, cli
                         .and_then(|result| result.as_ref().ok());
                     let count = signals.len();
                     for (index, signal) in signals.into_iter().enumerate() {
+                        let taken = accepted(response, index, count);
+                        if !taken {
+                            // 没被接下（没启用、上一单还在处理等）：线索还新鲜时下一轮再交给选购。
+                            matcher.release(&signal);
+                        }
+                        if !new[index] && !taken {
+                            continue;
+                        }
+                        announced.insert(signal.target.key().0, signal.reported_at_ms);
                         let line = format!(
                             "共享到货线索：{} {}（汇总记录，官网库存待确认）。{}",
                             signal.target.store_title,
@@ -228,6 +259,9 @@ pub async fn run(app: AppHandle, mut control: watch::Receiver<ControlState>, cli
                             checkout_result(response, index, count)
                         );
                         let _ = app.emit(crate::NOTICE_CHANNEL, &line);
+                        if !new[index] {
+                            continue; // 重试后才被接下：写进日志，不再重复推送
+                        }
                         let notification =
                             apw_core::notify::Notification::new("有货线索 · 社区上报", line);
                         tokio::select! {
@@ -260,6 +294,31 @@ pub async fn run(app: AppHandle, mut control: watch::Receiver<ControlState>, cli
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_the_selected_hint_counts_as_taken_so_the_rest_are_retried() {
+        let response = json!({"offer":{"outcome":"queued","selectedIndex":1}});
+        assert!(accepted(Some(&response), 1, 2));
+        assert!(!accepted(Some(&response), 0, 2));
+        for outcome in [
+            "not_armed",
+            "paused",
+            "busy",
+            "stopping",
+            "ineligible",
+            "queue_full",
+        ] {
+            let refused = json!({"offer":{"outcome":outcome,"selectedIndex":null}});
+            assert!(!accepted(Some(&refused), 0, 1), "{outcome}");
+        }
+        assert!(!accepted(None, 0, 1));
+        assert!(!accepted(Some(&json!(null)), 0, 1));
+        assert!(!accepted(
+            Some(&json!({"offer":{"outcome":"queued","selectedIndex":5}})),
+            0,
+            2
+        ));
+    }
 
     #[test]
     fn queued_receipt_identifies_only_the_selected_store() {

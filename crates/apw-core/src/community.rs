@@ -155,6 +155,16 @@ impl Matcher {
             .retain(|_, stamp| now.saturating_sub(*stamp) <= MAX_AGE_MS * 2);
         Ok(signals)
     }
+
+    /// 这条线索没被自动选购接下（没启用、上一单还在处理、正在停止等）：放开去重，
+    /// 下一轮只要它还新鲜就再交给选购一次。只退回一个时间单位，比它更旧的线索仍被挡住。
+    pub fn release(&mut self, signal: &Signal) {
+        let key = signal.target.key().0;
+        if self.seen.get(&key) == Some(&signal.reported_at_ms) {
+            self.seen
+                .insert(key, signal.reported_at_ms.saturating_sub(1));
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -238,6 +248,39 @@ mod tests {
         assert!(
             matcher
                 .collect(&report, &[target], &Catalog::new(), now + 1)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_released_hint_is_offered_again_while_older_reports_stay_suppressed() {
+        let (target, mut data, now) = fixture();
+        let catalog = Catalog::new();
+        let targets = [target];
+        let mut matcher = Matcher::default();
+        let report: Report = serde_json::from_value(data.clone()).unwrap();
+        let hits = matcher.collect(&report, &targets, &catalog, now).unwrap();
+        assert_eq!(hits.len(), 1);
+        matcher.release(&hits[0]);
+        let again = matcher
+            .collect(&report, &targets, &catalog, now + 60_000)
+            .unwrap();
+        assert_eq!(again.len(), 1, "没被接下的线索，下一轮还能再交给选购");
+        assert_eq!(again[0].reported_at_ms, hits[0].reported_at_ms);
+        assert!(
+            matcher
+                .collect(&report, &targets, &catalog, now + 61_000)
+                .unwrap()
+                .is_empty(),
+            "没有再次放开就不会重复"
+        );
+        matcher.release(&again[0]);
+        data["cities"][0]["products"][0]["last_at"] = json!("2026-10-23T01:59:50Z");
+        let older: Report = serde_json::from_value(data).unwrap();
+        assert!(
+            matcher
+                .collect(&older, &targets, &catalog, now)
                 .unwrap()
                 .is_empty()
         );
