@@ -1,0 +1,9 @@
+{
+  "armed": true,
+  "busy": true,
+  "stopping": false,
+  "offer": {
+    "outcome": "queued",
+    "selectedIndex": 1
+  }
+}

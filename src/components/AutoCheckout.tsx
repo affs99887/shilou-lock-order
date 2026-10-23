@@ -117,7 +117,7 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
         <Button size="sm" variant="ghost" className="action-login" disabled={locked || foreign} title="打开 Apple 账号页，在弹出的浏览器窗口登录；登录确认后自动结束，不加购" onClick={() => void command("login")}>{status?.loginTask ? "等待登录…" : "登录 Apple 账户"}</Button>
       </div>
     </div>
-    <p className="checkout-note" data-testid="checkout-session">账号登录：{status?.session || "尚未检查。开售前请先点「登录 Apple 账户」登录好，结账时少一步。"}</p>
+    <p className="checkout-note" data-testid="checkout-session">账号登录：{status?.session || "开始选购时检查官网登录状态；仅在官网要求时由本人认证"}。选购窗口建议最小化保留，关闭后重新结账仍可能需要登录。</p>
     {(!plan || !localTargets.length || locked) && <p className="checkout-note" data-testid="checkout-disabled-reason">{pending ? "正在处理，请稍候…" : status?.stopping ? "正在停止，完成后可重新启用。" : needsAttention ? "当前选购已暂停，新库存不会另开订单。请按下方原因处理后继续；若官网窗口已关闭，请先停止选购，再重新启用。" : status?.busy ? "选购正在执行；如需重新启用，请先停止选购。" : status?.armed ? "自动选购已启用；修改方案或重新启用前，请先停止选购。" : !plan ? "选购组件尚未就绪；连接失败时请重启软件后重试。" : "请先在左侧添加至少一个监控目标（与选购地区一致）。"}</p>}
     <Dialog open={confirmation !== null} onOpenChange={value => { if (!value) setConfirmation(null); }}>
       <DialogContent>
@@ -181,7 +181,7 @@ export function AutoCheckout({ targets, expanded, onSettings }: { targets: Targe
         <div className="flex flex-wrap items-end gap-3">{[0,1,2].map(i => <label key={i}>{datePolicy === "by_model" ? "Duo 取货日期" : "取货日期"} {i + 1}<Input type="date" disabled={locked} value={plan.pickup_dates[i] || ""} onChange={e => { const ds=[...plan.pickup_dates];ds[i]=e.target.value;edit({pickup_dates:ds.filter(Boolean)}); }} /></label>)}</div>
       </>}
       {foreign && <p className="section-note">国际日期仅按官网可明确核验的日期选择；无法识别时提示本人处理，不猜测当地日期。</p>}
-      <label className="flex items-center gap-2"><input type="checkbox" disabled={locked} checked={plan.clear_bag_before_purchase} onChange={e => edit({clear_bag_before_purchase:e.target.checked})} />每次新选购前清空当前 Apple 账号购物袋（包括已有商品）</label>
+      <label className="flex items-center gap-2"><input type="checkbox" disabled={locked} checked={plan.clear_bag_before_purchase} onChange={e => edit({clear_bag_before_purchase:e.target.checked})} />购物袋与目标不符时，允许清空已有商品；符合方案时直接复用</label>
       {!localTargets.length&&<p role="alert">当前选购地区没有监控目标，请先在左侧添加对应地区的商品和门店。</p>}
       <p className="section-note">{foreign?'到付款或需要人工处理时发送 Bark 提醒；国际版不自动锁单、付款或授信。':'确认待支付状态后发送 Bark 提醒。下单不保证留货；授信、签约和支付由本人完成。'}</p>
     </div>}

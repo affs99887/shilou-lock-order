@@ -232,7 +232,7 @@ test('manual start stays disabled while a checkout runs, is stopping, or for oth
 test('advance login is one click, needs no plan save, and shows the account state', async () => {
  const a = ui();
  const session = () => a.nodes().find(n => n.props?.['data-testid'] === 'checkout-session').props.children.join('');
- assert.match(session(), /尚未检查/);
+ assert.match(session(), /仅在官网要求时由本人认证/);
  a.button('登录 Apple 账户').props.onClick(); await new Promise(setImmediate);
  assert.deepEqual(a.calls.map(x => x.op), ['login'], '只发 login，不保存方案、不启用选购');
  a.hooks[0] = { ...a.hooks[0], session: '账号页登录已确认；后续购买复用当前窗口，结账仍可能再次认证' };

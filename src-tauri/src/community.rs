@@ -90,6 +90,45 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// A successful IPC exchange is not proof that this hint started checkout.
+/// Only the per-request receipt may identify the one selected target.
+fn checkout_result(
+    response: Option<&serde_json::Value>,
+    index: usize,
+    count: usize,
+) -> &'static str {
+    let Some(receipt) = response.and_then(|value| value.get("offer")) else {
+        return "自动选购是否启动尚未确认，请查看 App 中的选购状态";
+    };
+    match receipt["outcome"].as_str() {
+        Some("queued") => match receipt["selectedIndex"].as_u64() {
+            Some(selected) if selected < count as u64 && selected == index as u64 => {
+                "自动选购已受理，等待资料和官网校验；尚未确认下单"
+            }
+            Some(selected) if selected < count as u64 => {
+                "本批线索已选择另一监控目标，本门店未另开选购"
+            }
+            _ => "自动选购回执无法对应目标，请查看 App 中的选购状态",
+        },
+        Some("paused") => {
+            "自动选购未启动：上一任务已暂停；请核对购物袋或订单，继续原任务，或停止后重新启用"
+        }
+        Some("not_armed") => "自动选购未启动：尚未启用，请在 App 中启用有货自动选购",
+        Some("busy") => "自动选购未启动：已有选购任务正在执行",
+        Some("review") => "自动选购未启动：上一任务停在订单核对页，请先处理",
+        Some("stopping") => "自动选购未启动：正在停止上一任务",
+        Some("order_review") => "自动选购未启动：已有未核对的下单请求，请先检查 Apple 订单",
+        Some("blocked") => "自动选购未启动：官网拒绝访问，请先处理当前选购任务",
+        Some("activating") => "自动选购未启动：启用所需的资料仍在校验",
+        Some("profile_required") => "自动选购未启动：联系资料需要补充，请查看选购方案",
+        Some("cooldown") => "自动选购未启动：该目标仍在短暂等待期",
+        Some("ineligible") => "自动选购未启动：线索过期或未通过方案检查，具体原因见 App 选购状态",
+        Some("empty") => "自动选购未启动：没有可用的选购目标",
+        Some("queue_full") => "自动选购未启动：选购后台暂忙，请查看 App 选购状态",
+        _ => "自动选购是否启动尚未确认，请查看 App 中的选购状态",
+    }
+}
+
 pub async fn run(app: AppHandle, mut control: watch::Receiver<ControlState>, client: Client) {
     let mut matcher = Matcher::default();
     let mut status = Status::default();
@@ -176,10 +215,17 @@ pub async fn run(app: AppHandle, mut control: watch::Receiver<ControlState>, cli
                     if control.borrow().generation != config.generation {
                         continue;
                     }
-                    for signal in signals {
+                    let response = offered
+                        .as_ref()
+                        .ok()
+                        .and_then(|result| result.as_ref().ok());
+                    let count = signals.len();
+                    for (index, signal) in signals.into_iter().enumerate() {
                         let line = format!(
-                            "共享到货线索：{} {}（汇总记录，官网库存待确认）",
-                            signal.target.store_title, signal.target.product_name
+                            "共享到货线索：{} {}（汇总记录，官网库存待确认）。{}",
+                            signal.target.store_title,
+                            signal.target.product_name,
+                            checkout_result(response, index, count)
                         );
                         let _ = app.emit(crate::NOTICE_CHANNEL, &line);
                         let notification =
@@ -207,5 +253,65 @@ pub async fn run(app: AppHandle, mut control: watch::Receiver<ControlState>, cli
             changed = control.changed() => { if changed.is_err() { return; } }
             () = tokio::time::sleep(Duration::from_secs(delay)) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn queued_receipt_identifies_only_the_selected_store() {
+        let response: serde_json::Value =
+            serde_json::from_str(include_str!("../../checkout/fixtures/offer-receipt.json"))
+                .unwrap();
+        assert!(checkout_result(Some(&response), 1, 2).contains("已受理"));
+        assert!(checkout_result(Some(&response), 0, 2).contains("未另开选购"));
+        assert!(!checkout_result(Some(&response), 1, 2).contains("已启动"));
+    }
+
+    #[test]
+    fn paused_and_disabled_are_distinct_from_accepted() {
+        for (outcome, expected) in [
+            ("paused", "上一任务已暂停"),
+            ("not_armed", "尚未启用"),
+            ("order_review", "未核对的下单请求"),
+            ("stopping", "正在停止"),
+            ("cooldown", "等待期"),
+            ("ineligible", "未通过方案检查"),
+            ("busy", "正在执行"),
+            ("review", "订单核对页"),
+            ("blocked", "官网拒绝访问"),
+            ("activating", "资料仍在校验"),
+            ("profile_required", "联系资料需要补充"),
+            ("empty", "没有可用"),
+            ("queue_full", "后台暂忙"),
+        ] {
+            let response = json!({"offer":{"outcome":outcome,"selectedIndex":null}});
+            let line = checkout_result(Some(&response), 0, 1);
+            assert!(line.contains("未启动"), "{outcome}");
+            assert!(line.contains(expected), "{outcome}");
+        }
+    }
+
+    #[test]
+    fn missing_or_malformed_receipts_never_claim_started() {
+        let responses = [
+            json!(null),
+            json!({"armed":true,"busy":true}),
+            json!({"offer":{"outcome":"future_status"}}),
+            json!({"offer":{"outcome":"queued","selectedIndex":null}}),
+            json!({"offer":{"outcome":"queued","selectedIndex":true}}),
+            json!({"offer":{"outcome":"queued","selectedIndex":-1}}),
+            json!({"offer":{"outcome":"queued","selectedIndex":2}}),
+        ];
+        for response in &responses {
+            assert!(
+                checkout_result(Some(response), 0, 2).contains("确认")
+                    || checkout_result(Some(response), 0, 2).contains("无法对应")
+            );
+        }
+        assert!(checkout_result(None, 0, 2).contains("尚未确认"));
     }
 }

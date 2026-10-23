@@ -771,12 +771,13 @@ class Attempt:
                             if total + price * wanted_quantity > self.preferences["max_price"]:
                                 return self.finish("over_budget", "添加 AppleCare+ 后超预算，仅记录")
                         return click(c, action)
-            if care == "add" and care_state != "included":
+            if ((care == "add" and care_state != "included") or
+                    (care == "none" and care_state not in ("none", "included"))):
                 if self.care_wait_since is None:
                     self.care_wait_since = now
                 if now - self.care_wait_since < 5:
                     return Decision("wait", "等待购物袋 AppleCare+ 明细加载；不重复加购")
-                return self.finish("attention", "购物袋尚未确认包含 AppleCare+，请本人核对")
+                return self.finish("attention", "购物袋 AppleCare+ 状态尚未与方案核对，未点击结账；请本人核对")
             self.care_wait_since = None
             if care == "none" and care_state == "included":
                 return self.finish("attention", "购物袋包含未选择的 AppleCare+，请本人核对")

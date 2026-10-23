@@ -2,7 +2,7 @@ import copy
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from worker import Bridge, core
 
@@ -53,19 +53,64 @@ class CartReuseTests(unittest.TestCase):
         self.assertNotEqual(decision.kind, 'ready')
         self.assertNotEqual(decision.reason, 'checkout')
 
-    def test_explicit_clear_takes_priority_over_same_item_reuse(self):
+    def test_matching_cart_is_reused_even_with_legacy_clear_setting(self):
         self.service.preferences['clear_bag_before_purchase']=True
         self.snapshot['items'][0]['remove_ref']='remove'
         self.service.clear_tick(self.snapshot,11)
-        self.assertIsNone(self.service.attempt)
-        self.assertEqual(self.service.phase,'CLEAR_BAG')
-        self.assertEqual(self.service.dispatch.call_args.args[1].kind,'remove')
-        self.service.dispatch.reset_mock()
-        self.service.clear_tick(self.snapshot,12)
+        self.assertTrue(self.service.attempt.add_submitted)
+        self.assertEqual(self.service.phase,'RUN')
         self.service.dispatch.assert_not_called()
-        self.service.start_product=Mock()
-        self.service.clear_tick(dict(stage='BAG',empty_bag=True,items=[]),13)
-        self.service.start_product.assert_called_once()
+        self.service.browser.navigate.assert_not_called()
+
+    def test_reused_cart_dispatches_only_checkout_after_fresh_validation(self):
+        self.service.preferences['clear_bag_before_purchase'] = True
+        self.service.active = True
+        del self.service.dispatch  # Exercise the real dispatcher against a mock browser.
+        self.service.clear_tick(self.snapshot, 11)
+        fresh = {**copy.deepcopy(self.snapshot), 'total': 9999, 'bag_applecare': 'none',
+                 'controls': [dict(ref='checkout', label='结账', role='button')]}
+        self.service.browser.call.side_effect = [fresh, dict(result='dispatched')]
+        with patch.object(core.time, 'monotonic', return_value=12):
+            self.service.tick()
+        writes = [c.args[2] for c in self.service.browser.call.call_args_list if len(c.args) == 3]
+        self.assertEqual([(c['kind'], c['ref']) for c in writes], [('click', 'checkout')])
+        self.service.browser.navigate.assert_not_called()
+        self.service.browser.open.assert_not_called()
+
+    def test_unconfirmed_coverage_waits_then_pauses_without_checkout(self):
+        self.service.clear_tick(self.snapshot, 11)
+        snapshot = {**self.snapshot, 'total': 9999, 'bag_applecare': 'unconfirmed',
+                    'controls': [dict(ref='checkout', label='结账', role='button')]}
+        self.assertEqual(self.service.attempt.decide(snapshot, 12).kind, 'wait')
+        self.assertEqual(self.service.attempt.decide(snapshot, 17).kind, 'attention')
+        self.assertFalse(self.service.attempt.bag_verified)
+
+    def test_unwanted_coverage_does_not_checkout_without_a_verified_remove_control(self):
+        self.service.clear_tick(self.snapshot, 11)
+        snapshot = {**self.snapshot, 'total': 9999, 'bag_applecare': 'included',
+                    'controls': [dict(ref='checkout', label='结账', role='button')]}
+        self.assertEqual(self.service.attempt.decide(snapshot, 12).kind, 'attention')
+        self.assertFalse(self.service.attempt.bag_verified)
+
+    def test_requested_coverage_and_budget_are_checked_for_existing_cart(self):
+        self.service.preferences['applecare'] = 'add'
+        self.service.clear_tick(self.snapshot, 11)
+        snapshot = {**self.snapshot, 'total': 9999, 'bag_applecare': 'included',
+                    'controls': [dict(ref='checkout', label='结账', role='button')]}
+        self.assertEqual(self.service.attempt.decide(snapshot, 12).reason, 'checkout')
+
+    def test_entry_retry_reuses_owned_browser_instead_of_rotating_windows(self):
+        self.service.preflight(fresh=True)
+        self.service.browser.open.assert_called_once_with('https://www.apple.com.cn/shop/bag', foreground=False)
+        self.service.browser.rotate.assert_not_called()
+        self.assertIn('符合方案时直接结账', self.service.status['reason'])
+
+    def test_cancelled_retry_never_opens_a_window(self):
+        self.bridge.cancel.set()
+        self.service.preflight(fresh=True)
+        self.service.rotate_entry('https://www.apple.com.cn/shop/bag')
+        self.service.browser.assert_not_called()
+        self.assertEqual(self.service.browser.mock_calls, [])
 
     def test_multiple_cart_rows_are_removed_serially_then_start_target(self):
         self.service.preferences['clear_bag_before_purchase']=True
@@ -107,6 +152,12 @@ class CartReuseTests(unittest.TestCase):
 
     def test_pending_remove_never_becomes_a_fresh_attempt(self):
         self.service.pending_remove = (1, 10, False)
+        self.service.clear_tick(self.snapshot, 11)
+        self.assertIsNone(self.service.attempt)
+        self.service.dispatch.assert_not_called()
+
+    def test_trade_in_plan_cannot_skip_its_product_page_checks(self):
+        self.service.preferences.update(purchase_plan='trade_in', trade_in='manual')
         self.service.clear_tick(self.snapshot, 11)
         self.assertIsNone(self.service.attempt)
         self.service.dispatch.assert_not_called()

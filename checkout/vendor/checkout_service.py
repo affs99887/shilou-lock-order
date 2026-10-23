@@ -1168,7 +1168,7 @@ class Service:
         if (self.job == "monitor" and self.attempt and not self.attempt.add_submitted and
                 (s.get("stage") == "STORE_WAIT" or
                  (s.get("stage") == "LOADING" and now - self.phase_since > 30))):
-            self.schedule_product_retry("官网暂未就绪；等待后切换专属窗口重新打开入口")
+            self.schedule_product_retry("官网暂未就绪；等待后重新打开选购入口")
             return
         if not self.attempt:
             self.attention("尝试上下文缺失")

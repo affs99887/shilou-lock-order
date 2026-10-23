@@ -469,14 +469,17 @@ function appleCheckout(request) {
   const careRows = [...root.querySelectorAll('li[data-autom^="bag-item-"]')].filter(e =>
     visible(e) && targetMatches((e.querySelector('h2,h3,[data-autom*=product-name]') || {}).textContent || ""));
   let careEvidence = 0;
+  let careAbsentRows = 0;
   const bagCareActions = new Map();
   if (stage === "BAG") for (const row of careRows) {
     const evidenceBefore = careEvidence;
+    let careAbsent = false;
     const actions = [...row.querySelectorAll('button,a,[role=button]')].filter(visible);
     for (const e of actions) {
       const t=norm(label(e));
       if (!/applecare/i.test(t) || /了解|比较|详情|learn|compare/.test(t)) continue;
       if (/^(添加|加购|加入|add)/i.test(t) && !disabled(e)) {
+        careAbsent = true;
         const prices=[...new Set(amounts(label(e)).filter(n=>n>0))];
         if(prices.length===1)bagCareActions.set(ref(e),{ref:ref(e),kind:"add",price:prices[0]});
       }
@@ -490,6 +493,10 @@ function appleCheckout(request) {
       return t.length < 160 && !/未添加|尚未|不包含|notincluded/.test(t) &&
         /(?:已添加|已包含|包含了).*applecare|applecare.*(?:已添加|已包含)/i.test(t);
     })) careEvidence++;
+    if ([...row.querySelectorAll('p,span,h3,h4')].filter(visible).some(e => {
+      const t = norm(e.textContent);
+      return /^(?:(?:未添加|尚未添加|不包含)applecare\+?(?:服务计划|保障计划)?|applecare\+?(?:服务计划|保障计划)?(?:未添加|尚未添加|notincluded))[。.!！]?$/.test(t);
+    })) careAbsent = true;
     for (const action of actions.filter(e => /^(移除|删除|remove)$/i.test(norm(label(e))))) {
       // The nearest coverage section can use a plain "移除" link. Require a
       // coverage heading and a price, and never climb into the phone row.
@@ -504,7 +511,9 @@ function appleCheckout(request) {
     }
     const quantityControl = row.querySelector('[data-autom="item-quantity-dropdown"]');
     const rowItem = quantityControl && items.find(i=>i.quantity_ref===ref(quantityControl));
-    if (rowItem) rowItem.applecare_included = careEvidence > evidenceBefore;
+    const included = careEvidence > evidenceBefore;
+    if (!included && careAbsent) careAbsentRows++;
+    if (rowItem) rowItem.applecare_included = included ? true : careAbsent ? false : null;
   }
   const regionEditors = controls.filter(c=>c.group==="pickup_region_edit");
   const regionOpen = stage==="FULFILLMENT" && regionEditors.length===1 &&
@@ -666,7 +675,8 @@ function appleCheckout(request) {
     pickup_schedule: stage==="FULFILLMENT" ? pickupSchedule : [],
     bag_busy: [...root.querySelectorAll('[aria-busy="true"],[role="progressbar"]')].some(visible),
     pickup_region_open:regionOpen, pickup_region_step:regionStep, region_picker:regionPicker,
-    bag_applecare: careEvidence > 0 ? "included" : "unconfirmed",
+    bag_applecare: careEvidence > 0 ? "included" :
+      careRows.length > 0 && careAbsentRows === careRows.length ? "none" : "unconfirmed",
     bag_care_actions: careRows.length===1 ? [...bagCareActions.values()] : [],
     trade_in_selected: controls.some(c=>c.role==="radio" && c.selected && /折抵|换购/.test(c.label) && !/^不折抵/.test(c.label) && !/年年焕新/.test(c.label)),
     diagnostics: {privacy_consent_required:privacyConsentRequired,contact_verification_required:contactVerificationRequired,bag_care_evidence_count:careEvidence, bag_target_row_count:careRows.length,

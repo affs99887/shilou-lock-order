@@ -19,6 +19,7 @@ from order_guard import OrderGuard
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'vendor'))
 import checkout_service as core
+from offer_receipt import OfferHistory
 from checkout_engine import CATALOG, DEFAULTS, validate_preferences, purchase_plan_problem, resolve_pickup_preferences, matches_target
 from checkout_stores import STORES
 from checkout_profile import store_profile, editable_profile, normalized_regional_profile
@@ -135,6 +136,7 @@ class Checkout(core.Service):
         self.trace = []
         self.trace_mark = None
         self.login_reminder_at = None
+        self.update(session='开始选购时检查官网登录状态；仅在官网要求时由本人认证')
 
     def record_diagnostic(self, stage, status=0, action="", result=""):
         # Fixed internal enums only. Never store DOM, URLs, contacts or cookies.
@@ -380,7 +382,16 @@ class Checkout(core.Service):
         if not self.owner.cancel.is_set():
             if sys.platform == 'win32' and not fresh:
                 self.browser.prepare_entry()
-            return super().preflight(fresh)
+            result = super().preflight(fresh)
+            if self.phase == 'CLEAR_BAG':
+                self.update(reason='先核对现有购物袋；符合方案时直接结账，空袋时再选择商品')
+            return result
+
+    def rotate_entry(self, url):
+        # Entry retries keep the owned tab and its page session. open() only
+        # replaces a lost tab before checkout; it never adopts another tab.
+        if not self.owner.cancel.is_set():
+            self.browser.open(url, foreground=False)
 
     def clear_tick(self, snapshot, now):
         if self.owner.cancel.is_set():
@@ -400,9 +411,9 @@ class Checkout(core.Service):
         # The ordinary BAG state still verifies price, care, quantity and errors
         # on its next fresh browser read before allowing checkout.
         items = snapshot.get('items', [])
-        if (not self.execution_preferences['clear_bag_before_purchase'] and
-                snapshot.get('stage') == 'BAG' and self.pending_remove is None and
+        if (snapshot.get('stage') == 'BAG' and self.pending_remove is None and
                 not snapshot.get('bag_busy') and not snapshot.get('errors') and
+                self.execution_preferences.get('trade_in', 'none') == 'none' and
                 len(items) == 1 and not self.owner.order_guard.blocked):
             target = core.purchase_targets(self.execution_preferences)[self.index]
             if (matches_target(items[0].get('title', ''), target) and
@@ -463,6 +474,7 @@ class Bridge:
         self.file_lock = None
         self.error = ''
         self.closed = False
+        self.offer_history = OfferHistory(data)
 
     def status(self):
         with self.mutex, self.service.lock:
@@ -486,6 +498,15 @@ class Bridge:
                     'loginTask': self.login_task,
                     'manualRun': self.manual_run}
 
+    def offer_reply(self, hits, outcome, selected=None):
+        response = self.status()
+        # This receipt belongs to this request only. A later status read must
+        # not make a different hint look accepted because checkout is busy.
+        response['offer'] = {'outcome': outcome, 'selectedIndex': selected}
+        if any(isinstance(hit, dict) and hit.get('source') == 'sunbelife_aggregate' for hit in hits):
+            self.offer_history.record(outcome, len(hits), selected, response)
+        return response
+
     def request(self, message):
         op = message.get('op')
         if op == 'status':
@@ -503,26 +524,56 @@ class Bridge:
                     self.stopping = True
                 return self.status()
             if op == 'offer':
-                if not self.armed or self.reserved or self.stopping:
-                    return self.status()
+                hits = message.get('hits', [])
+                if not isinstance(hits, list):
+                    return self.offer_reply([], 'ineligible')
+                hits = hits[:1000]
+                if self.stopping:
+                    return self.offer_reply(hits, 'stopping')
+                if self.order_guard.blocked:
+                    return self.offer_reply(hits, 'order_review')
+                if getattr(self.service, 'access_blocked', False):
+                    return self.offer_reply(hits, 'blocked')
+                if self.activation_pending:
+                    return self.offer_reply(hits, 'activating')
+                if self.reserved:
+                    mode = self.service.status.get('mode')
+                    outcome = ('paused' if mode in ('attention', 'manual_region') or self.error else
+                               'review' if mode == 'ready' else 'busy')
+                    return self.offer_reply(hits, outcome)
+                if self.profile_required:
+                    return self.offer_reply(hits, 'profile_required')
+                if not self.armed:
+                    return self.offer_reply(hits, 'not_armed')
                 # Confirmed inventory or explicit community hints, in target order.
                 rejected = ''
-                for hit in message.get('hits', [])[:1000]:
+                cooling = False
+                for index, hit in enumerate(hits):
+                    if not isinstance(hit, dict) or not isinstance(hit.get('target'), dict):
+                        rejected = '库存目标无法唯一对应选购方案'
+                        continue
                     t = hit.get('target', {})
+                    if any(not isinstance(t.get(field), str) for field in ('locale', 'partNumber', 'storeNumber')):
+                        rejected = '库存目标无法唯一对应选购方案'
+                        continue
                     key = (t.get('partNumber'), t.get('storeNumber')) if t.get('locale') == 'zh_CN' else (t.get('locale'), t.get('partNumber'), t.get('storeNumber'))
                     if time.monotonic() < self.avoid_until.get(key, 0):
+                        cooling = True
                         continue
                     try:
                         plan_for_hit(self.plan, hit)
                     except (ValueError, KeyError, TypeError) as exc:
                         rejected = str(exc) if type(exc) is ValueError else '库存目标无法唯一对应选购方案'
                         continue
+                    try:
+                        self.tasks.put_nowait((self.generation, 'start', copy.deepcopy(hit)))
+                    except queue.Full:
+                        return self.offer_reply(hits, 'queue_full')
                     self.reserved = True
-                    self.tasks.put_nowait((self.generation, 'start', copy.deepcopy(hit)))
-                    break
-                if not self.reserved and rejected:
+                    return self.offer_reply(hits, 'queued', index)
+                if rejected:
                     self.service.update(reason=rejected)
-                return self.status()
+                return self.offer_reply(hits, 'ineligible' if rejected else 'cooldown' if cooling else 'empty')
             if op == 'open_bag_if_idle':
                 # Used only by the monitor. Hold the cross-process checkout
                 # lock through the browser-open dispatch, not just a probe.
