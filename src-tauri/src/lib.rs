@@ -370,6 +370,7 @@ async fn checkout_command(
         "acknowledge_order",
         "login",
         "manual",
+        "end_run",
     ]
     .contains(&op.as_str())
     {

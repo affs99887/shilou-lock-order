@@ -258,6 +258,7 @@ class BridgeTests(unittest.TestCase):
 
 class FakeCheckout:
     outcome = 'sold_out'
+    reason = '同城其他门店也都不可取货'
     def __init__(self, owner, plan):
         self.browser = Mock()
         self.owner=owner;self.lock=threading.RLock();self.preferences=plan
@@ -273,14 +274,25 @@ class FakeCheckout:
         self.active=False
         self.status['mode']='ready' if self.outcome=='ready' else 'attention'
         self.owner.retryable_end=self.outcome=='sold_out'
+        self.owner.end_reason=self.reason if self.outcome=='sold_out' else ''
         self.owner.closed=True
+
+def one_pass(b):
+    """让后台循环只跑一圈：先处理停止，再取一次排队的任务，然后退出。"""
+    get = b.tasks.get
+    def once(timeout=None):
+        b.closed = True
+        return get(timeout=0.01)
+    b.tasks.get = once
+    b.closed = False
+    b.run()
 
 class RecoveryTests(unittest.TestCase):
     @patch('worker.core.normalized_profile', return_value={})
     @patch.object(Bridge, 'acquire')
     def test_manual_purchase_runs_saved_plan_for_selected_target(self, *_):
         with tempfile.TemporaryDirectory() as d:
-            b=Bridge(FakeCheckout,data=Path(d));b.plan['auto_submit_order']=True
+            b=Bridge(FakeCheckout,data=Path(d));b.plan['auto_submit_order']=True;b.service.outcome='unknown'
             b.request({'op':'purchase','hit':hit(),'confirmSubmission':True});b.run()
             self.assertFalse(b.error)
             self.assertTrue(b.automatic)
@@ -345,6 +357,7 @@ class ManualStartTests(unittest.TestCase):
     def test_manual_start_needs_no_stock_and_switches_stores_only_for_this_run(self, *_):
         with tempfile.TemporaryDirectory() as d:
             b = Bridge(FakeCheckout, data=Path(d))
+            b.service.outcome = 'unknown'
             self.assertTrue(b.request({'op': 'manual', 'hit': unchecked_hit()})['busy'])
             b.run()
             self.assertFalse(b.error)
@@ -372,30 +385,143 @@ class ManualStartTests(unittest.TestCase):
             self.assertFalse(b.reserved)
             self.assertTrue(b.tasks.empty())
 
-    def test_manual_start_is_mainland_only_and_refuses_while_armed(self):
+    def test_manual_start_is_mainland_only_and_refused_during_a_running_checkout(self):
         with tempfile.TemporaryDirectory() as d:
             b = Bridge(FakeCheckout, data=Path(d))
             h = unchecked_hit()
             h['target']['locale'] = 'en_SG'
-            with self.assertRaises(ValueError):
-                b.request({'op': 'manual', 'hit': h})
             b.armed = True
             with self.assertRaises(ValueError):
+                b.request({'op': 'manual', 'hit': h})
+            self.assertTrue(b.armed, '检查没通过时不能先把自动选购关掉')
+            b.reserved = True
+            with self.assertRaises(ValueError):
                 b.request({'op': 'manual', 'hit': unchecked_hit()})
-            self.assertFalse(b.reserved)
             self.assertTrue(b.tasks.empty())
 
-    def test_manual_sold_out_still_notifies_and_is_not_worded_as_a_rehearsal(self):
+    def test_manual_start_pauses_waiting_auto_checkout_with_its_authorization(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(FakeCheckout, data=Path(d))
+            b.plan['auto_submit_order'] = True
+            b.armed, b.submission_confirmed = True, True
+            s = b.request({'op': 'manual', 'hit': unchecked_hit(), 'confirmSubmission': True})
+            self.assertFalse(s['armed'])
+            self.assertTrue(s['busy'])
+            self.assertTrue(s['autoPaused'])
+            self.assertEqual(s['singleRun'], 'manual')
+            self.assertTrue(b.resume_submission)
+            # 改设置、启用之类仍要等这次结束。
+            with self.assertRaises(ValueError):
+                b.request({'op': 'configure', 'plan': b.plan})
+
+    @patch('worker.core.normalized_profile', return_value={})
+    @patch('worker.time.time', return_value=100)
+    @patch.object(Bridge, 'acquire')
+    def test_manual_sold_out_ends_by_itself_and_resumes_auto_checkout(self, *_):
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(FakeCheckout, data=Path(d))
+            b.plan['auto_submit_order'] = True
+            b.armed, b.submission_confirmed = True, True
+            b.request({'op': 'manual', 'hit': unchecked_hit(), 'confirmSubmission': True})
+            b.run()
+            s = b.status()
+            self.assertFalse(s['busy'], '没买到时不用本人点停止')
+            self.assertTrue(s['armed'], '之前开着的自动选购恢复')
+            self.assertTrue(s['submissionEnabled'], '恢复时带回启用时的下单授权')
+            self.assertIsNone(s['singleRun'])
+            self.assertFalse(s['autoPaused'])
+            self.assertEqual(s['lastResult'], '手动选购没买到：同城其他门店也都不可取货。自动选购已恢复，有货后自动选购')
+            self.assertEqual(b.notice['title'], '手动选购没买到')
+            self.assertEqual(b.avoid_until, {}, '没买到的门店不进等待期：自动选购有货就能马上用')
+            b.request({'op': 'offer', 'hits': [hit()]})
+            self.assertEqual(b.tasks.qsize(), 1, '恢复后新库存照常接手')
+
+    @patch('worker.core.normalized_profile', return_value={})
+    @patch.object(Bridge, 'acquire')
+    def test_rehearsal_and_row_purchase_also_end_by_themselves_without_turning_auto_on(self, *_):
+        for op in ('rehearse', 'purchase'):
+            with tempfile.TemporaryDirectory() as d:
+                b = Bridge(FakeCheckout, data=Path(d))
+                b.request({'op': op, 'hit': hit() if op == 'purchase' else unchecked_hit()})
+                b.run()
+                s = b.status()
+                self.assertFalse(s['busy'], op)
+                self.assertFalse(s['armed'], '开始前没启用的，结束后也不启用')
+                self.assertFalse(b.submission_confirmed)
+                self.assertTrue(s['lastResult'].startswith('测试演练结束' if op == 'rehearse' else '这次选购没买到'))
+
+    @patch('worker.core.normalized_profile', return_value={})
+    @patch.object(Bridge, 'acquire')
+    def test_a_run_that_reached_the_review_page_never_resumes_auto_checkout(self, *_):
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(FakeCheckout, data=Path(d))
+            b.service.outcome = 'ready'
+            b.armed = True
+            b.request({'op': 'manual', 'hit': unchecked_hit()})
+            b.run()
+            self.assertTrue(b.status()['busy'], '到核对页要留给本人处理')
+            self.assertFalse(b.status()['autoPaused'])
+            b.request({'op': 'end_run'})
+            one_pass(b)
+            s = b.status()
+            self.assertFalse(s['busy'])
+            self.assertFalse(s['armed'], '本人可能已在官网手动下单，不能再自动买一台')
+            self.assertIn('走到过订单核对页', s['lastResult'])
+
+    @patch('worker.core.normalized_profile', return_value={})
+    @patch.object(Bridge, 'acquire')
+    def test_ending_a_paused_manual_run_resumes_auto_but_stop_turns_everything_off(self, *_):
+        for op, armed in (('end_run', True), ('stop', False)):
+            with tempfile.TemporaryDirectory() as d:
+                b = Bridge(FakeCheckout, data=Path(d))
+                b.service.outcome = 'unknown'
+                b.armed = True
+                b.request({'op': 'manual', 'hit': unchecked_hit()})
+                b.run()
+                self.assertTrue(b.status()['busy'], '需要本人处理的暂停仍要等本人')
+                b.request({'op': op})
+                one_pass(b)
+                s = b.status()
+                self.assertFalse(s['busy'], op)
+                self.assertEqual(s['armed'], armed, op)
+                self.assertIsNone(s['singleRun'])
+
+    def test_end_run_only_touches_single_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(FakeCheckout, data=Path(d))
+            b.armed, b.reserved = True, True
+            s = b.request({'op': 'end_run'})
+            self.assertFalse(s['stopping'], '自动选购的单子要用停止，不能被「结束本次」悄悄留着自动选购')
+            self.assertTrue(s['armed'])
+
+    @patch('worker.core.normalized_profile', side_effect=ValueError('资料不完整'))
+    def test_manual_start_that_fails_before_the_browser_still_resumes_auto(self, _):
+        with tempfile.TemporaryDirectory() as d:
+            b = Bridge(FakeCheckout, data=Path(d))
+            b.armed = True
+            b.request({'op': 'manual', 'hit': unchecked_hit()})
+            one_pass(b)
+            s = b.status()
+            self.assertFalse(s['busy'])
+            self.assertTrue(s['armed'])
+            self.assertIn('联系与收货资料', s['error'])
+
+    def test_plain_ends_are_marked_for_every_single_run_but_not_release_for_auto(self):
         with tempfile.TemporaryDirectory() as d:
             b = Bridge(data=Path(d))
-            b.automatic = True
-            b.manual_run = True
+            b.single_run = 'manual'
             b.service.event('sold_out', '同城其他门店也都不可取货')
-            self.assertFalse(b.retryable_end, '手动开始没货要照常提醒，不能静默结束')
-            b.service.attention('同城其他门店也都不可取货；单次测试结束，不循环抢购')
-            self.assertIn('本次手动选购已停止', b.status()['reason'])
-            self.assertNotIn('测试', b.status()['reason'])
-            self.assertIsNotNone(b.notice)
+            self.assertTrue(b.retryable_end)
+            self.assertEqual(b.end_reason, '同城其他门店也都不可取货')
+            b.retryable_end = False
+            b.service.event('over_budget', '购物袋超预算，仅记录')
+            self.assertEqual(b.end_reason, '购物袋超预算')
+            b.retryable_end = False
+            b.service.event('not_released', '官网尚未开放购买')
+            self.assertTrue(b.retryable_end)
+            b.retryable_end, b.single_run = False, None
+            b.service.event('not_released', '官网尚未开放购买')
+            self.assertFalse(b.retryable_end, '自动选购遇到还没开卖照旧停下等本人')
 
 class FakeLogin(FakeCheckout):
     """提前登录：打开账号页后第一次检查就确认已登录。"""

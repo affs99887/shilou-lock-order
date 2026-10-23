@@ -51,11 +51,12 @@ test('rehearsal never sends formal submission confirmation, even if configured o
  a.button('测试演练').props.onClick();await new Promise(setImmediate);
  assert.deepEqual(a.calls.map(x=>x.op),['configure','rehearse']);assert.equal(a.calls[1].payload.confirmSubmission,undefined);
 });
-test('idle armed checkout can switch explicitly to rehearsal without remaining disabled',async()=>{
+test('rehearsal while auto checkout waits leaves pausing to the backend instead of turning it off',async()=>{
  const a=ui({auto_submit_order:true});a.hooks[0].armed=true;
  assert.equal(a.button('测试演练').props.disabled,false);
+ assert.match(a.button('测试演练').props.title,/自动选购先暂停，这次结束后自动恢复/);
  a.button('测试演练').props.onClick();await new Promise(setImmediate);
- assert.deepEqual(a.calls.map(x=>x.op),['disarm','configure','rehearse']);
+ assert.deepEqual(a.calls.map(x=>x.op),['rehearse'],'不先关掉自动选购，也不保存锁着的方案');
  assert.equal(a.calls.at(-1).payload.confirmSubmission,undefined);
 });
 test('rehearsal remains disabled during an active checkout or stop',()=>{
@@ -82,7 +83,7 @@ test('paused checkout is not presented as actively purchasing',()=>{
  a.hooks[0].busy=true;
  a.hooks[0].mode='attention';
  assert.equal(a.nodes().find(n=>n.props['data-testid']==='checkout-execution-status').props.children[1].props.children,'已暂停，需要处理');
- assert.match(a.nodes().find(n=>n.props['data-testid']==='checkout-disabled-reason').props.children,/新库存不会另开订单/);
+ assert.match(a.button('人工处理后继续').props.title,/新库存不会另开订单/);
  a.hooks[0].mode='awaiting_payment';
  assert.equal(a.nodes().find(n=>n.props['data-testid']==='checkout-execution-status').props.children[1].props.children,'订单待支付');
 });
@@ -97,16 +98,37 @@ test('payment switches are locked while checkout is armed; manual selection disa
  a.hooks[0].armed=false;a.button('官网手选').props.onClick();assert.equal(a.hooks[1].auto_submit_order,false);
 });
 
-test('armed checkout explains why activation and editing are locked',()=>{
+test('armed checkout turns the start button into a stop for auto checkout and explains the locked plan',async()=>{
  const a=ui();a.hooks[0].armed=true;
- assert.equal(a.button('已启用，等待有货').props.disabled,true);
- assert.match(a.nodes().find(n=>n.props['data-testid']==='checkout-disabled-reason').props.children,/先停止选购/);
+ assert.equal(a.button('启用有货自动选购'),undefined);
+ const stop=a.button('停止自动选购');
+ assert.equal(stop.props.hidden,false);assert.equal(stop.props.disabled,false);
+ assert.match(stop.props.title,/库存监测照常进行/);
+ stop.props.onClick();await new Promise(setImmediate);
+ assert.deepEqual(a.ops(),['stop']);
+ assert.ok(a.nodes().some(n=>n.type==='p'&&/请先在上方停止或结束后再改/.test(n.props.children)),'方案里说明为什么改不了');
+});
+// 选购操作那一排当下看得见的按钮文字。
+function visibleButtons(a){const row=a.nodes().find(n=>n.props.className==='checkout-actions');return [row.props.children].flat().filter(b=>b&&!b.props.hidden).map(b=>b.props.children);}
+test('only the buttons usable in the current state are shown, at most three besides login',()=>{
+ const a=ui({},undefined,{expanded:false});
+ assert.deepEqual(visibleButtons(a),['启用有货自动选购','手动开始选购','测试演练','登录 Apple 账户']);
+ a.hooks[0].armed=true;
+ assert.deepEqual(visibleButtons(a),['停止自动选购','手动开始选购','测试演练','登录 Apple 账户']);
+ a.hooks[0].busy=true;
+ assert.deepEqual(visibleButtons(a),['停止自动选购','登录 Apple 账户'],'自动选购的单子在跑');
+ Object.assign(a.hooks[0],{armed:false,mode:'attention',singleRun:'manual',autoPaused:true});
+ assert.deepEqual(visibleButtons(a),['人工处理后继续','结束本次选购','登录 Apple 账户']);
+ assert.equal(a.button('人工处理后继续').props.variant,undefined,'需要处理时「继续」是实心主按钮');
+ a.hooks[0].stopping=true;
+ assert.deepEqual(visibleButtons(a),['正在停止…','登录 Apple 账户']);
 });
 test('main actions stay on the panel while plan details live in a closed modal',()=>{
  const a=ui({},undefined,{expanded:false});
  const state=label=>a.shown().find(x=>x.node.props.children===label||x.node.props['aria-label']===label);
- for(const label of ['选购目标','启用有货自动选购','手动开始选购','测试演练','人工处理后继续','登录 Apple 账户'])
+ for(const label of ['选购目标','启用有货自动选购','手动开始选购','测试演练','登录 Apple 账户'])
   assert.equal(state(label)?.hidden,false,label+' 要一直显示在面板上');
+ assert.equal(state('人工处理后继续').hidden,true,'没有暂停的选购时不占位置');
  assert.equal(state('保存设置').hidden,true,'详细方案在没打开的弹窗里');
  assert.equal(a.shown().find(x=>x.node.type==='ConfigModal').node.props.open,false);
  const open=ui({},undefined,{expanded:true});
@@ -125,14 +147,38 @@ test('opening and closing the plan modal goes through the page toggle',()=>{
  shownOpen.shown().find(x=>x.node.type==='ConfigModal').node.props.onClose();
  assert.equal(toggles,2);
 });
-test('closed plan modal keeps the stop control available for armed, active and stopping checkout',()=>{
+test('the stop control says what it stops and a single run only ends itself',async()=>{
  const a=ui({},undefined,{expanded:false});
- assert.equal(a.button('停止选购').props.hidden,true);
- for(const state of ['armed','busy','stopping']){
-  a.hooks[0][state]=true;
-  assert.equal(a.button('停止选购').props.hidden,false,state);
-  a.hooks[0][state]=false;
- }
+ const stops=()=>a.shown().filter(x=>!x.hidden&&x.node.props.className==='stop-checkout').map(x=>x.node);
+ assert.deepEqual(stops(),[]);
+ a.hooks[0].armed=true;
+ assert.deepEqual(stops().map(n=>n.props.children),['停止自动选购']);
+ a.hooks[0].armed=false;a.hooks[0].busy=true;
+ assert.deepEqual(stops().map(n=>n.props.children),['停止选购'],'自动选购暂停后留下的单子');
+ Object.assign(a.hooks[0],{singleRun:'manual',autoPaused:true});
+ const [end]=stops();
+ assert.equal(end.props.children,'结束本次选购');
+ assert.match(end.props.title,/自动选购随即恢复/);
+ end.props.onClick();await new Promise(setImmediate);
+ assert.deepEqual(a.ops(),['end_run'],'只结束这一次，不发会关掉自动选购的 stop');
+ a.hooks[0].autoPaused=false;
+ assert.doesNotMatch(stops()[0].props.title,/自动选购随即恢复/);
+ a.hooks[0].stopping=true;
+ assert.equal(stops()[0].props.children,'正在停止…');assert.equal(stops()[0].props.disabled,true);
+});
+test('the status line shows the running progress, and the last single run result when idle',()=>{
+ const a=ui();
+ const line=()=>a.nodes().find(n=>n.props.role==='status'&&n.props.className==='checkout-note');
+ assert.equal(line().props.hidden,true,'空闲又没有结果时不占位置');
+ a.hooks[0].lastResult='手动选购没买到：目标已售罄';
+ assert.equal(line().props.hidden,false);assert.equal(line().props.children,'手动选购没买到：目标已售罄');
+ Object.assign(a.hooks[0],{busy:true,singleRun:'manual',autoPaused:true,reason:'正在手动开始选购',elapsed:3.25});
+ assert.equal(line().props.children,'正在手动开始选购 · 3.3 秒');
+ const chip=a.nodes().find(n=>n.props['data-testid']==='checkout-execution-status');
+ assert.equal(chip.props.children[1].props.children,'手动选购执行中');
+ assert.equal(chip.props.children[2].props.children,'自动选购暂停中，结束后恢复');
+ Object.assign(a.hooks[0],{busy:false,armed:true,singleRun:null,autoPaused:false,reason:'等待新库存'});
+ assert.equal(line().props.children,'等待新库存','等待有货时不再显示上一次选购的耗时');
 });
 test('arming without auto-submit stops before submission and still starts monitoring',async()=>{
  const a=ui();a.button('启用有货自动选购').props.onClick();await new Promise(setImmediate);
@@ -185,7 +231,9 @@ test('mixed model rule exposes Duo dates and stays visible on the home panel',()
  const fields=a.nodes().filter(n=>n.type==='Input'&&n.props.type==='date');
  assert.deepEqual(fields.map(n=>n.props.value),dates);
  const summary=()=>a.nodes().find(n=>n.props['data-testid']==='pickup-rule-summary');
- assert.match(summary().props.children[1],/Duo 仅限 2026-10-23、2026-10-24、2026-10-25；其他型号最早可取/);
+ // 首页一行里省掉年份，悬停提示里是完整日期。
+ assert.equal(summary().props.children[1],'Duo 仅限 10-23、10-24、10-25；其他型号最早可取');
+ assert.equal(summary().props.title,'Duo 仅限 2026-10-23、2026-10-24、2026-10-25；其他型号最早可取');
  a.hooks[4]=false;
  assert.ok(summary());
  a.hooks[4]=true;
@@ -223,12 +271,13 @@ test('manual start sends the selected target without asking when auto-submit is 
  assert.equal(a.calls[1].payload.targetKey, 'zh_CN|R683|B');
  assert.equal(a.calls[1].payload.confirmSubmission, false);
 });
-test('manual start with auto-submit starts directly after disarming an idle arming', async () => {
+test('manual start while auto checkout waits starts directly and keeps auto checkout for afterwards', async () => {
  const a = ui({ auto_submit_order: true }); a.hooks[0].armed = true;
  assert.equal(a.button('手动开始选购').props.disabled, false, '已启用但空闲时也能手动开始');
+ assert.match(a.button('手动开始选购').props.title, /自动选购先暂停，这次结束后自动恢复/);
  a.button('手动开始选购').props.onClick(); await new Promise(setImmediate);
  assert.equal(a.hooks[6], null, '不弹二次确认');
- assert.deepEqual(a.ops(), ['disarm', 'configure', 'manual'], '手动开始不另外开始监测');
+ assert.deepEqual(a.ops(), ['manual'], '不先关掉自动选购，也不另外开始监测');
  assert.equal(a.calls.at(-1).payload.confirmSubmission, true);
 });
 test('manual start stays disabled while a checkout runs, is stopping, or for other regions', () => {

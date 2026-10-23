@@ -1225,6 +1225,7 @@ class Service:
             self.schedule_product_retry(decision.reason + "；按优先级切换下一配置", next_variant=True)
         elif kind == "monitor":
             if self.job in PURCHASE_TASKS:
+                self.event("not_released", "官网尚未开放购买", elapsed=elapsed, target=target)
                 self.attention("尚未开放购买，演练未验证；不会无限等待")
                 return
             self.breaker.success()

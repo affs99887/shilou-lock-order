@@ -42,6 +42,10 @@ Manual start (mainland China only) runs the same single attempt without a
 monitor hit. At pickup it may switch to another same-city store whose option is
 enabled and not marked unavailable; store choice is a reversible selection and
 never re-adds to the bag. This switching has offline coverage only.
+A manual start or rehearsal while auto checkout waits pauses auto checkout and
+resumes it when that single run ends, unless the run reached the review page,
+an order result is unverified, or Apple refused access. A definite sold-out,
+over-budget or not-yet-released result ends a single run without a stop click.
 The live cart-removal 404 observed in the prior candidate remains an outstanding
 acceptance item; offline tests do not constitute a verified live checkout.
 

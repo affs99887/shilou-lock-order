@@ -136,10 +136,12 @@
 .toolbar-community { padding-right: 14px; border-right: 1px solid var(--border); }
 .monitor-toggle { min-width: 112px; height: 36px; }
 .app-main { flex: 1; min-height: 0; min-width: 0; padding-block: 16px; display: flex; flex-direction: column; gap: 14px; }
-.monitor-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 282px minmax(0, 1fr); align-items: stretch; gap: 14px; }
+.monitor-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 320px minmax(0, 1fr); align-items: stretch; gap: 14px; }
 
-.target-panel { min-width: 0; min-height: 0; overflow-y: auto; padding: 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); box-shadow: 0 3px 16px #00000003; }
-.target-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 18px; }
+/* 添加监控：标题和「添加」按钮固定在框的上下两端，中间的选择项放不下时在框内滚动。 */
+.target-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--card); box-shadow: 0 3px 16px #00000003; }
+.target-heading { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px 18px 0; margin-bottom: 10px; }
+.target-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 18px 14px; }
 .target-heading h2 { font-size: 16px; font-weight: 650; letter-spacing: -.3px; }
 .target-heading p { font-size: 11px; color: var(--muted-foreground); margin-top: 5px; }
 .target-heading > button { color: var(--muted-foreground); margin-right: -6px; }
@@ -150,10 +152,10 @@
 .target-field label span { font-size: 10px; font-weight: 400; color: var(--muted-foreground); margin-left: auto; }
 .target-field [role="combobox"] { min-width: 0; height: 34px; border-color: var(--input); border-radius: 8px; box-shadow: 0 1px 2px #00000003; font-size: 12px; padding-inline: 10px; }
 .store-field { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 0; }
-.target-actions { margin-top: 16px; }
+.target-actions { flex: none; padding: 12px 18px 10px; border-top: 1px solid var(--border); }
 .target-actions > button { height: 39px; background: var(--link-muted); color: var(--link); border: 1px solid color-mix(in srgb, var(--link) 16%, transparent); font-size: 13px; }
 .target-actions > button:hover:enabled { background: color-mix(in srgb, var(--link) 15%, var(--card)); }
-.target-selection-note { color: var(--muted-foreground); text-align: center; font-size: 10px; line-height: 1.6; margin-top: 10px; min-height: 16px; }
+.target-selection-note { color: var(--muted-foreground); text-align: center; font-size: 10px; line-height: 1.6; margin-top: 8px; min-height: 16px; }
 .target-tip { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 18px; display: flex; align-items: flex-start; gap: 9px; color: var(--muted-foreground); }
 .target-tip > svg { margin-top: 2px; flex-shrink: 0; }
 .target-tip p { font-size: 11px; color: var(--foreground); }
@@ -192,9 +194,14 @@
 @media (max-height: 820px) { .query-logs { height: 132px; } .app-main { gap: 12px; padding-block: 12px; } }
 
 .checkout-panel { box-shadow: 0 3px 16px #00000003; border-color: var(--border); }
-/* 自动选购放在顶栏下面：第一行是状态，第二行是选购目标和按钮，需要本人处理时提示条插在两行之间。 */
-.compact-checkout { flex: none; padding: 14px 20px; border-radius: 14px; }
-.checkout-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; font-size: 12px; }
+/* 自动选购放在顶栏下面，尽量少占高度：第一行是状态，第二行是选购目标和按钮，第三行是当前进度。
+   需要本人处理时提示条插在第一、二行之间。 */
+.compact-checkout { flex: none; padding: 12px 18px; border-radius: 14px; }
+.checkout-facts { display: flex; align-items: center; gap: 8px 20px; min-width: 0; font-size: 12px; white-space: nowrap; }
+.checkout-facts > * { flex: none; }
+/* 取货规则和账号状态可能很长：一行放不下时截断，完整内容在悬停提示里。 */
+.checkout-facts > .fact-long { flex: 0 1 auto; min-width: 64px; overflow: hidden; text-overflow: ellipsis; }
+.checkout-facts .fact-hint { margin-left: 8px; color: var(--muted-foreground); }
 .checkout-facts h2 { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
 .checkout-facts h2 > svg { color: var(--link); }
 .checkout-facts > div > span:first-child { margin-right: 6px; color: var(--muted-foreground); }
@@ -213,18 +220,23 @@
 .checkout-banner p { margin-top: 2px; }
 .checkout-banner .checkout-banner-note { margin-top: 4px; font-size: 11px; opacity: .85; }
 .checkout-banner.is-done { border-color: color-mix(in srgb, var(--in-stock) 40%, transparent); background: color-mix(in srgb, var(--in-stock) 10%, var(--card)); color: var(--in-stock); }
-.checkout-main { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
-.checkout-target { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
-.checkout-target select { min-width: 0; width: 340px; max-width: 100%; height: 34px; padding-inline: 10px; font-size: 13px; border-color: var(--input); border-radius: 8px; }
-/* 操作分三组：开始选购、选购过程、账号。组之间用细竖线隔开，主操作只有「启用有货自动选购」一个实心按钮。 */
-.checkout-actions { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
-.action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.action-group + .action-group { padding-left: 16px; border-left: 1px solid var(--border); }
+.checkout-main { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.checkout-target { flex: 0 1 380px; min-width: 220px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+.checkout-target select { flex: 1; min-width: 0; height: 36px; padding-inline: 10px; font-size: 13px; border-color: var(--input); border-radius: 8px; }
+/* 按钮按状态出现，同一时间最多三个。主次固定：实心按钮是当下的主操作（启用、继续），
+   蓝色浅底是手动开始，普通描边是演练，红色描边是停止或结束，右端的文字按钮是登录。 */
+.checkout-actions { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .checkout-actions .manual-start { background: var(--link-muted); color: var(--link); border-color: color-mix(in srgb, var(--link) 22%, transparent); }
 .checkout-actions .manual-start:hover:enabled { background: color-mix(in srgb, var(--link) 15%, var(--card)); color: var(--link); }
 .checkout-actions .stop-checkout { color: var(--destructive); border-color: color-mix(in srgb, var(--destructive) 35%, transparent); }
+.checkout-actions .stop-checkout:hover:enabled { color: var(--destructive); background: color-mix(in srgb, var(--destructive) 8%, var(--card)); }
 .checkout-actions .action-login { margin-left: auto; color: var(--link); }
-.checkout-note { margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--muted-foreground); }
+.checkout-note { margin-top: 6px; font-size: 12px; line-height: 1.6; color: var(--muted-foreground); }
+/* 第三行：左边是当前进度，右边是登录小提示；进度为空时提示靠左。 */
+.checkout-foot { display: flex; align-items: baseline; gap: 4px 16px; margin-top: 8px; }
+.checkout-foot .checkout-note { flex: 1; min-width: 0; margin: 0; }
+.checkout-foot .login-tip { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted-foreground); }
+.checkout-foot .checkout-note[hidden] + .login-tip { margin-left: 0; }
 
 /* 配置弹窗：盖住页面居中显示，标题和底栏固定，只有中间内容滚动。 */
 .config-modal { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px 16px; }
@@ -259,11 +271,9 @@ button:disabled { cursor: not-allowed; }
 button:focus-visible, select:focus-visible { outline: 3px solid #007aff88; outline-offset: 3px; }
 @media (max-width: 1150px) {
   .app-shell { padding-inline: 22px; }
-  .monitor-workspace { grid-template-columns: 260px minmax(0, 1fr); gap: 18px; }
-  .target-panel { padding: 16px; }
+  .monitor-workspace { grid-template-columns: 300px minmax(0, 1fr); gap: 14px; }
   .inventory-stats { gap: 10px; }
-  /* 这个宽度下按钮组会换行，去掉组间竖线，免得新的一行以一条竖线开头。 */
-  .action-group + .action-group { padding-left: 0; border-left: 0; }
+  .checkout-facts { gap: 8px 14px; }
 }
 @media (max-width: 800px) {
   .app-shell { padding-inline: 16px; }
@@ -275,11 +285,11 @@ button:focus-visible, select:focus-visible { outline: 3px solid #007aff88; outli
   .inventory-table { flex: none; height: 420px; }
   .target-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .store-field { margin: 0; border: 0; padding: 0; }
-  .target-actions { max-width: 320px; }
   .target-tip { display: none; }
   .settings-grid { grid-template-columns: minmax(0, 1fr); }
-  /* 窄屏时按钮组上下排，竖线和靠右都去掉，免得换行后线条悬空。 */
-  .action-group + .action-group { padding-left: 0; border-left: 0; }
+  /* 窄屏时状态可以换行，选购目标独占一行，按钮排在它下面。 */
+  .checkout-facts { flex-wrap: wrap; }
+  .checkout-target { flex: 1 1 100%; }
   .checkout-actions .action-login { margin-left: 0; }
   .config-modal { padding: 12px; }
   .config-modal-panel { max-height: calc(100dvh - 24px); }

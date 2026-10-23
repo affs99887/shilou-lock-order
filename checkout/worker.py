@@ -321,9 +321,7 @@ class Checkout(core.Service):
     def attention(self, reason):
         if getattr(self.owner, 'manual_run', False):
             # 手动开始和演练共用同一套单次流程，提示里别写成「演练」。
-            reason = (reason.replace('；单次测试结束，不循环抢购', '；本次手动选购已停止，可换配置或刷新门店后重试')
-                      .replace('尚未开放购买，演练未验证；不会无限等待', '官网尚未开放购买；开放后再点「手动开始选购」')
-                      .replace('单次演练超过 5 分钟', '手动选购超过 5 分钟'))
+            reason = reason.replace('单次演练超过 5 分钟', '手动选购超过 5 分钟')
         if self.access_blocked:
             code = self.status.get('diagnostics', {}).get('access_http_status', 0)
             reason = ('Apple 返回 HTTP ' + str(code) if code in (403,429,541) else 'Apple 拒绝访问') + \
@@ -361,9 +359,11 @@ class Checkout(core.Service):
             self.record_diagnostic("ACTION", action='bag_recheck')
             self.update(intervention=None)
             self.last_handoff = None
-        # 手动开始没货时要照常提醒本人，不走「等下一次有货再换目标」那条静默结束的路。
-        if kind in ('sold_out', 'over_budget') and self.owner.automatic and not getattr(self.owner, 'manual_run', False):
+        # 官网明确没货、超预算，或单次选购时官网还没开卖，都不需要本人处理：
+        # 自动选购等下一次有货再换目标，单次选购（手动开始、演练、库存表立即选购）直接结束。
+        if kind in ('sold_out', 'over_budget') or (kind == 'not_released' and getattr(self.owner, 'single_run', None)):
             self.owner.retryable_end = True
+            self.owner.end_reason = reason.replace('，仅记录', '')
         return super().event(kind, reason, **extra)
 
     def dispatch(self, snapshot, decision):
@@ -478,6 +478,17 @@ class Bridge:
         self.login_task = False
         # 当前流程是「手动开始选购」：不需要监控确认有货，到选门店时可改选同城有货门店。
         self.manual_run = False
+        # 单次选购（manual 手动开始、rehearse 演练、purchase 库存表立即选购）的种类；自动选购和提前登录为 None。
+        self.single_run = None
+        # 单次选购开始前自动选购已启用：先暂停，这次结束后恢复，并带回启用时的下单授权。
+        self.resume_armed = False
+        self.resume_submission = False
+        # 这次单次选购走到过订单核对页；本人可能已在官网手动下单，结束后不恢复自动选购。
+        self.reached_review = False
+        # 官网明确没货、超预算或还没开卖的具体原因，单次选购自己结束时写进结果。
+        self.end_reason = ''
+        # 上一次单次选购怎么结束的，空闲时显示在状态行。
+        self.last_result = ''
         self.stopping = False
         self.generation = 0
         self.notice = None
@@ -506,7 +517,11 @@ class Bridge:
                     'orderNeedsReview': self.order_guard.blocked,
                     'session': s.get('session'),
                     'loginTask': self.login_task,
-                    'manualRun': self.manual_run}
+                    'manualRun': self.manual_run,
+                    'singleRun': self.single_run,
+                    'autoPaused': bool(self.resume_armed and not self.reached_review and
+                                       not self.order_guard.blocked),
+                    'lastResult': self.last_result}
 
     def offer_reply(self, hits, outcome, selected=None):
         response = self.status()
@@ -529,9 +544,20 @@ class Bridge:
                 self.submission_confirmed = False
                 self.activation_pending = False
                 self.generation += 1
+                # 停止就是关掉自动选购：正在跑的单次选购结束后也不再恢复它。
+                self.resume_armed = False
+                self.last_result = ''
                 if op == 'stop':
                     self.cancel.set()
                     self.stopping = True
+                return self.status()
+            if op == 'end_run':
+                # 只结束这一次单次选购，后台循环停好后再恢复它开始前已启用的自动选购。
+                # 已经自己结束或正在停止时什么也不做，免得和自动结束撞在一起时报错。
+                if self.single_run and self.reserved and not self.stopping:
+                    self.cancel.set()
+                    self.stopping = True
+                    self.generation += 1
                 return self.status()
             if op == 'offer':
                 hits = message.get('hits', [])
@@ -615,7 +641,9 @@ class Bridge:
                     raise ValueError('当前没有可以继续的选购流程')
                 self.tasks.put_nowait((self.generation, op, None))
                 return self.status()
-            if self.reserved or self.armed or self.stopping:
+            # 自动选购已启用、正在等库存时，可以直接手动开始或演练：先暂停自动选购，这次结束后恢复。
+            pause_auto = op in ('rehearse', 'manual') and self.armed and not self.reserved and not self.stopping
+            if (self.reserved or self.armed or self.stopping) and not pause_auto:
                 raise ValueError('请先停止自动选购，再修改设置或演练')
             if op == 'login':
                 if self.plan.get('checkout_locale', 'zh_CN') != 'zh_CN':
@@ -623,6 +651,7 @@ class Bridge:
                 if self.order_guard.blocked:
                     raise ValueError('上次下单结果需核对；请先查看 Apple 订单')
                 self.reserved = True
+                self.last_result = ''
                 self.service.update(reason='正在打开 Apple 账号页；请在弹出的浏览器窗口登录')
                 self.tasks.put_nowait((self.generation, op, message))
                 return self.status()
@@ -661,14 +690,25 @@ class Bridge:
                     if message['hit'].get('target', {}).get('locale') != 'zh_CN':
                         raise ValueError('手动开始目前只支持中国大陆官网')
                     plan_for_hit(self.plan, message['hit'], rehearsal=True)
+                if op == 'purchase':
+                    plan_for_hit(self.plan, message['hit'], manual=True)
+                # 检查都通过后才动状态：暂停自动选购后若再报错，自动选购就丢了。
+                if op in ('rehearse', 'purchase', 'manual'):
+                    self.single_run = op
+                    self.resume_armed = pause_auto
+                    self.resume_submission = pause_auto and self.submission_confirmed
+                    self.reached_review = False
+                    self.last_result = ''
+                    self.armed = False
+                if op == 'manual':
                     self.submission_confirmed = message.get('confirmSubmission') is True
                     self.service.update(reason='正在手动开始选购；指定门店不能取货时会改选同城能取货的门店')
                 if op == 'arm':
                     self.activation_pending = True
                     self.submission_confirmed = False
+                    self.last_result = ''
                     self.service.update(reason='正在校验已保存资料，请完成可能出现的系统授权提示')
                 if op == 'purchase':
-                    plan_for_hit(self.plan, message['hit'], manual=True)
                     self.submission_confirmed = message.get('confirmSubmission') is True
                     self.service.update(reason='正在按所选有货目标准备选购')
                 self.reserved = True
@@ -692,6 +732,36 @@ class Bridge:
         if self.file_lock:
             self.file_lock.close()
             self.file_lock = None
+
+    def end_single_run(self, how):
+        """单次选购结束：清掉它的标记，并恢复它开始前已启用的自动选购。须持有 self.mutex。
+
+        走到过订单核对页、有未核对的下单记录或官网拒绝过访问时不恢复：
+        本人可能刚在官网手动下了单，或者官网还在限制访问。"""
+        if self.reached_review:
+            blocked = '这次走到过订单核对页，为免重复购买，自动选购没有恢复；需要时再点「启用有货自动选购」'
+        elif self.order_guard.blocked:
+            blocked = '有未核对的下单记录，自动选购没有恢复；核对订单后再启用'
+        elif getattr(self.service, 'access_blocked', False):
+            blocked = '官网拒绝过访问，自动选购没有恢复；稍后再点「启用有货自动选购」'
+        else:
+            blocked = ''
+        resumed = self.resume_armed and not blocked
+        if resumed:
+            self.armed = True
+            self.submission_confirmed = self.resume_submission
+        else:
+            self.submission_confirmed = False
+        tail = '自动选购已恢复，有货后自动选购' if resumed else blocked if self.resume_armed else ''
+        self.last_result = '。'.join(part for part in (how, tail) if part)
+        if self.last_result:
+            self.service.update(reason=self.last_result)
+        self.single_run = None
+        self.manual_run = False
+        self.resume_armed = False
+        self.resume_submission = False
+        self.reached_review = False
+        return resumed
 
     def require_profile(self):
         locale = self.plan.get('checkout_locale', 'zh_CN')
@@ -730,6 +800,8 @@ class Bridge:
                         self.manual_run = False
                         self.stopping = False
                         self.error = ''
+                        if self.single_run:
+                            self.end_single_run('已结束本次选购')
                 try:
                     epoch, op, data = self.tasks.get(timeout=.1)
                 except queue.Empty:
@@ -803,6 +875,7 @@ class Bridge:
                             if not self.automatic:
                                 self.submission_confirmed = False
                             self.retryable_end = False
+                            self.end_reason = ''
                             t = hit['target']
                             self.current_key = (t['partNumber'], t['storeNumber']) if t['locale'] == 'zh_CN' else (t['locale'], t['partNumber'], t['storeNumber'])
                         self.service.command('rehearse')
@@ -839,8 +912,27 @@ class Bridge:
                             self.login_task = False
                             self.reserved = False
                         self.release()
+                    mode = self.service.status.get('mode')
+                    if self.single_run and mode in ('ready', 'submitting', 'awaiting_payment'):
+                        self.reached_review = True
+                    plain_end = (self.retryable_end and not self.order_guard.blocked and
+                                 mode == 'attention' and not self.stopping)
                     # Retain ownership on unknown writes, login or final review.
-                    if self.retryable_end and not self.order_guard.blocked and self.service.status.get('mode') == 'attention' and self.armed and not self.stopping:
+                    if plain_end and self.single_run:
+                        # 单次选购没买到时不用本人点停止，直接结束；它开始前已启用的自动选购随即恢复。
+                        label = {'manual': '手动选购没买到', 'rehearse': '测试演练结束',
+                                 'purchase': '这次选购没买到'}[self.single_run]
+                        self.service.command('stop')
+                        self.release()
+                        self.cancel.set()
+                        with self.mutex:
+                            self.retryable_end = False
+                            self.reserved = False
+                            # 作废结束前排队的「继续」，免得它在已结束的流程上报错、关掉刚恢复的自动选购。
+                            self.generation += 1
+                            self.end_single_run(label + '：' + (self.end_reason or '官网显示暂时买不了'))
+                            self.notice = {'title': label, 'body': self.last_result, 'id': uuid.uuid4().hex}
+                    elif plain_end and self.armed:
                         self.avoid_until[self.current_key] = time.monotonic() + 30
                         self.service.command('stop')
                         self.service.update(reason='官网明确无货或超预算，等待新库存后选择其他目标')
@@ -848,7 +940,7 @@ class Bridge:
                         self.cancel.set()
                         self.retryable_end = False
                         self.reserved = False
-                    elif self.service.status.get('mode') in ('ready', 'attention'):
+                    elif mode in ('ready', 'attention'):
                         self.armed = False
             except Exception as exc:
                 code, kind, stage = self.record_exception(exc)
@@ -865,6 +957,10 @@ class Bridge:
                     self.service.attention(self.error)
                 else:
                     self.reserved = False
+                    if self.single_run:
+                        # 单次选购还没碰浏览器就失败了，原因在 error 里；它开始前已启用的自动选购照常恢复。
+                        with self.mutex:
+                            self.end_single_run('')
         self.service.command('stop')
         self.release()
         if sys.platform == 'win32':

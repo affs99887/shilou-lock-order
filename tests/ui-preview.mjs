@@ -30,7 +30,7 @@ await context.addInitScript(()=>{
  if(cmd in values)return values[cmd];
  if(cmd==='get_community_status')return {running:false,lastCheckedMs:null,lastSignal:null,error:null,nextCheckInSecs:null};
  if(cmd==='save_settings'){Object.assign(settings,args.settings);return structuredClone(settings);}
- if(cmd==='checkout_command'){if(args.op==='configure')status.plan=args.payload.plan;if(args.op==='arm'){status.armed=true;status.reason='已启用，等待命中';}if(args.op==='stop'){status.armed=false;status.reason='已停止选购';}if(args.op!=='status')window.__EMIT__('checkout://status',structuredClone(status));return structuredClone(status);}
+ if(cmd==='checkout_command'){if(args.op==='configure')status.plan=args.payload.plan;if(args.op==='arm'){status.armed=true;status.reason='已启用，等待命中';}if(args.op==='stop'){status.armed=false;status.reason='已停止选购';}if(args.op==='end_run')Object.assign(status,{busy:false,armed:status.autoPaused,mode:'stopped',singleRun:null,autoPaused:false,reason:'已结束本次选购。自动选购已恢复，有货后自动选购',lastResult:'已结束本次选购。自动选购已恢复，有货后自动选购'});if(args.op!=='status')window.__EMIT__('checkout://status',structuredClone(status));return structuredClone(status);}
  return null;
  }};
  window.__EMIT__=(name,payload)=>{for(const [eventId,listener] of events)if(listener.event===name)callbacks.get(listener.handler)?.({event:name,id:eventId,payload});};
@@ -60,6 +60,22 @@ assert.ok(logsBox.y>tableBox.y+tableBox.height-1,'logs sit below the inventory')
 assert.ok(viewport.height-(logsBox.y+logsBox.height)<=24,'logs sit at the bottom of the window');
 assert.equal(await page.evaluate(()=>document.documentElement.scrollHeight>innerHeight+1),false,'the page itself does not scroll vertically');
 await noOverflow();
+// 自动选购只占一小条：状态、按钮、进度各一行；当下能用的按钮排成一行，不会折成两行分不清主次。
+assert.ok(checkoutBox.height<=170,`checkout strip stays compact (${checkoutBox.height}px)`);
+const actionRows=()=>page.evaluate(()=>new Set([...document.querySelectorAll('.checkout-actions > button')].filter(b=>b.offsetParent).map(b=>Math.round(b.getBoundingClientRect().top))).size);
+assert.equal(await actionRows(),1,'action buttons share one row');
+assert.ok(targetBox.width>=300,'the add-monitor panel is wide enough for two fields per row');
+for(const [width,height] of [[1000,800],[1280,760]]){
+ await page.setViewportSize({width,height});
+ assert.equal(await actionRows(),1,`action buttons share one row at ${width}px`);
+ // 添加监控：标题和「添加」按钮固定在框内，选择项放不下时只有中间滚动。
+ const panel=await targets.boundingBox(), add=await targets.getByRole('button',{name:'添加',exact:true}).boundingBox();
+ assert.ok(add.y>=panel.y&&add.y+add.height<=panel.y+panel.height,`add button stays inside the panel at ${width}x${height}`);
+ assert.equal(await targets.evaluate(e=>e.scrollHeight>e.clientHeight),false,'the panel itself never scrolls the add button away');
+ await noOverflow();
+}
+await screenshot(page,'short-window.png');
+await page.setViewportSize({width:1280,height:900});
 await screenshot(page,'light.png',{fullPage:true});
 await page.emulateMedia({colorScheme:'dark'});
 await screenshot(page,'dark.png',{fullPage:true});
@@ -122,9 +138,23 @@ assert.equal(await page.getByRole('dialog').count(),0,'arming opens no confirmat
 assert.equal(await page.evaluate(()=>window.__UI_CALLS__.filter(c=>c.cmd==='checkout_command'&&c.args.op==='arm'&&c.args.payload.confirmSubmission===true).length),1);
 assert.ok(await page.evaluate(()=>{const calls=window.__UI_CALLS__.map(c=>c.cmd==='checkout_command'?c.args.op:c.cmd);return calls.indexOf('arm')<calls.indexOf('start_watching');}),'monitoring starts after arming');
 await page.evaluate(()=>window.__EMIT__('checkout://status',{...window.__CHECKOUT_STATUS__,armed:true,reason:'已启用，等待命中'}));
-await page.getByRole('button',{name:'停止选购',exact:true}).waitFor();
-assert.equal(await page.getByRole('button',{name:'停止选购',exact:true}).isVisible(),true,'stop stays on the page while the plan modal is closed');
-await page.evaluate(()=>window.__EMIT__('checkout://status',window.__CHECKOUT_STATUS__));
+await page.getByRole('button',{name:'停止自动选购',exact:true}).waitFor();
+assert.equal(await page.getByRole('button',{name:'停止自动选购',exact:true}).isVisible(),true,'stop stays on the page while the plan modal is closed');
+assert.equal(await page.getByRole('button',{name:'手动开始选购',exact:true}).isEnabled(),true,'manual start works while auto checkout waits');
+// 自动选购开着时手动开始，需要本人处理而暂停：主按钮是「继续」，另一个只结束这一次，自动选购随后恢复。
+await page.evaluate(()=>window.__EMIT__('checkout://status',Object.assign(window.__CHECKOUT_STATUS__,{armed:false,busy:true,mode:'attention',singleRun:'manual',autoPaused:true,reason:'需要人工处理：LOGIN'})));
+await page.getByRole('button',{name:'结束本次选购',exact:true}).waitFor();
+assert.equal(await page.getByRole('button',{name:'人工处理后继续',exact:true}).isVisible(),true);
+assert.equal(await page.getByRole('button',{name:'启用有货自动选购',exact:true}).count(),0,'start actions leave the row while a run is going');
+assert.equal(await actionRows(),1);
+await page.getByText('自动选购暂停中，结束后恢复').waitFor();
+await screenshot(page.getByRole('region',{name:'自动选购'}),'checkout-paused-run.png');
+await page.getByRole('button',{name:'结束本次选购',exact:true}).click();
+await page.waitForFunction(()=>window.__UI_CALLS__.some(c=>c.cmd==='checkout_command'&&c.args.op==='end_run'));
+assert.equal(await page.evaluate(()=>window.__UI_CALLS__.some(c=>c.cmd==='checkout_command'&&c.args.op==='stop')),false,'ending one run never sends the stop that turns auto checkout off');
+await page.getByText('已结束本次选购。自动选购已恢复，有货后自动选购').waitFor();
+await page.getByRole('button',{name:'停止自动选购',exact:true}).waitFor();
+await page.evaluate(()=>{Object.assign(window.__CHECKOUT_STATUS__,{armed:false,lastResult:''});window.__EMIT__('checkout://status',window.__CHECKOUT_STATUS__);});
 
 await page.evaluate(()=>window.__EMIT__('watcher://notice','界面演示数据，不代表实际库存。'));
 assert.equal(await page.getByRole('button',{name:'查询日志',exact:true}).count(),0,'logs have no fold toggle');
@@ -141,5 +171,5 @@ await page.getByText('从一个心仪的型号开始').waitFor();
 assert.equal(await page.getByRole('button',{name:'开始监测',exact:true}).isEnabled(),false);
 await screenshot(page,'empty.png',{fullPage:true});
 assert.deepEqual(errors,[]);
-console.log('UI preview passed: one-screen layout with checkout on top and logs docked at the bottom, both themes, 1280/1000 widths, target/Bark/contact/plan draft retention in modals, main actions and stop always on the page, one-click arming that also starts monitoring, one-click row purchase. Mocked IPC only; external requests blocked.');
+console.log('UI preview passed: one-screen layout with a compact checkout strip on top and logs docked at the bottom, both themes, 1280/1000 widths, state-dependent action buttons on one row, add button fixed in the add-monitor panel, target/Bark/contact/plan draft retention in modals, one-click arming that also starts monitoring, ending a paused manual run without turning auto checkout off, one-click row purchase. Mocked IPC only; external requests blocked.');
 }finally{await browser.close();server.close();}

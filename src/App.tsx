@@ -409,52 +409,54 @@ export default function App() {
                 <TooltipContent>从 Apple 官网更新当前品类的型号列表。</TooltipContent>
               </Tooltip>
             </div>
-            <div className="target-fields">
-              <div className="field-pair">
-                <div className="target-field">
-                  <Label>地区</Label>
-                  <Combobox className="w-full" options={ui.regions.map(r => ({ value: r.locale, label: r.title }))}
-                    value={ui.settings.locale} onChange={locale => { setStoreNumbers([]); resetProductSelection(); void changeLocale(locale); }}
-                    placeholder="选择地区" searchPlaceholder="搜索地区…" emptyText="没有匹配的地区" />
-                </div>
-                <div className="target-field">
-                  <Label>品类</Label>
-                  <Combobox className="w-full" options={ui.categories.map(c => ({ value: c.value, label: c.title }))}
-                    value={ui.category} onChange={value => { resetProductSelection(); setCategory(value as Category); }}
-                    placeholder="选择品类" searchPlaceholder="搜索品类…" emptyText="没有匹配的品类" disabled={ui.categories.length === 0} />
-                </div>
-              </div>
-              {ui.category === "iphone" ? <>
-                <div className="target-field">
-                  <Label>机型 <span>可多选</span></Label>
-                  <MultiCombobox className="w-full" options={iphoneFamilyOptions} values={families} onChange={onFamiliesChange}
-                    placeholder="选择机型" searchPlaceholder="搜索机型…" emptyText="没有匹配的机型"
-                    countLabel={n => `已选 ${n} 款机型`} disabled={iphoneFamilyOptions.length === 0} />
-                </div>
+            <div className="target-body">
+              <div className="target-fields">
                 <div className="field-pair">
                   <div className="target-field">
-                    <Label>容量 <span>可多选</span></Label>
-                    <MultiCombobox className="w-full" options={iphoneCapacityOptions} values={capacities} onChange={onCapacitiesChange}
-                      placeholder="选择容量" searchPlaceholder="搜索容量…" emptyText="没有匹配的容量"
-                      countLabel={n => `已选 ${n} 种容量`} disabled={families.length === 0 || iphoneCapacityOptions.length === 0} />
+                    <Label>地区</Label>
+                    <Combobox className="w-full" options={ui.regions.map(r => ({ value: r.locale, label: r.title }))}
+                      value={ui.settings.locale} onChange={locale => { setStoreNumbers([]); resetProductSelection(); void changeLocale(locale); }}
+                      placeholder="选择地区" searchPlaceholder="搜索地区…" emptyText="没有匹配的地区" />
                   </div>
                   <div className="target-field">
-                    <Label>颜色 <span>可多选</span></Label>
-                    <MultiCombobox className="w-full" options={iphoneColorOptions} values={colors} onChange={setColors}
-                      placeholder="选择颜色" searchPlaceholder="搜索颜色…" emptyText="没有匹配的颜色"
-                      countLabel={n => `已选 ${n} 种颜色`} disabled={capacities.length === 0 || iphoneColorOptions.length === 0} />
+                    <Label>品类</Label>
+                    <Combobox className="w-full" options={ui.categories.map(c => ({ value: c.value, label: c.title }))}
+                      value={ui.category} onChange={value => { resetProductSelection(); setCategory(value as Category); }}
+                      placeholder="选择品类" searchPlaceholder="搜索品类…" emptyText="没有匹配的品类" disabled={ui.categories.length === 0} />
                   </div>
                 </div>
-              </> : <div className="target-field">
-                <Label>型号</Label>
-                <Combobox className="w-full" options={productOptions} value={partNumber} onChange={setPartNumber}
-                  placeholder="选择型号" searchPlaceholder="搜索型号…" emptyText="没有匹配的型号" disabled={productOptions.length === 0} />
-              </div>}
-              <div className="target-field store-field">
-                <Label><MapPin size={13} /> 自提门店 <span>可多选</span></Label>
-                <MultiCombobox className="w-full" options={storeOptions} values={storeNumbers} onChange={setStoreNumbers}
-                  placeholder="选择自提门店" searchPlaceholder="搜索门店…" emptyText="没有匹配的门店"
-                  countLabel={n => `已选 ${n} 家门店`} disabled={storeOptions.length === 0} />
+                {ui.category === "iphone" ? <>
+                  <div className="target-field">
+                    <Label>机型 <span>可多选</span></Label>
+                    <MultiCombobox className="w-full" options={iphoneFamilyOptions} values={families} onChange={onFamiliesChange}
+                      placeholder="选择机型" searchPlaceholder="搜索机型…" emptyText="没有匹配的机型"
+                      countLabel={n => `已选 ${n} 款机型`} disabled={iphoneFamilyOptions.length === 0} />
+                  </div>
+                  <div className="field-pair">
+                    <div className="target-field">
+                      <Label>容量 <span>可多选</span></Label>
+                      <MultiCombobox className="w-full" options={iphoneCapacityOptions} values={capacities} onChange={onCapacitiesChange}
+                        placeholder="选择容量" searchPlaceholder="搜索容量…" emptyText="没有匹配的容量"
+                        countLabel={n => `已选 ${n} 种容量`} disabled={families.length === 0 || iphoneCapacityOptions.length === 0} />
+                    </div>
+                    <div className="target-field">
+                      <Label>颜色 <span>可多选</span></Label>
+                      <MultiCombobox className="w-full" options={iphoneColorOptions} values={colors} onChange={setColors}
+                        placeholder="选择颜色" searchPlaceholder="搜索颜色…" emptyText="没有匹配的颜色"
+                        countLabel={n => `已选 ${n} 种颜色`} disabled={capacities.length === 0 || iphoneColorOptions.length === 0} />
+                    </div>
+                  </div>
+                </> : <div className="target-field">
+                  <Label>型号</Label>
+                  <Combobox className="w-full" options={productOptions} value={partNumber} onChange={setPartNumber}
+                    placeholder="选择型号" searchPlaceholder="搜索型号…" emptyText="没有匹配的型号" disabled={productOptions.length === 0} />
+                </div>}
+                <div className="target-field store-field">
+                  <Label><MapPin size={13} /> 自提门店 <span>可多选</span></Label>
+                  <MultiCombobox className="w-full" options={storeOptions} values={storeNumbers} onChange={setStoreNumbers}
+                    placeholder="选择自提门店" searchPlaceholder="搜索门店…" emptyText="没有匹配的门店"
+                    countLabel={n => `已选 ${n} 家门店`} disabled={storeOptions.length === 0} />
+                </div>
               </div>
             </div>
             <div className="target-actions">
