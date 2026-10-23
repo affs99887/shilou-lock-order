@@ -65,6 +65,11 @@ await page.emulateMedia({colorScheme:'dark'});
 await screenshot(page,'dark.png',{fullPage:true});
 await page.emulateMedia({colorScheme:'light'});
 
+// 有货行的「立即选购」点一下直接发出选购，不弹确认窗。
+await page.getByRole('button',{name:'立即选购',exact:true}).click();
+await page.waitForFunction(()=>window.__UI_CALLS__.some(c=>c.cmd==='checkout_command'&&c.args.op==='purchase'));
+assert.equal(await page.getByRole('dialog').count(),0,'row purchase opens no confirmation dialog');
+
 // Multi-select a real combination from the isolated catalog; folding must keep it.
 async function pick(name,option){await page.getByRole('combobox',{name,exact:true}).click();await page.getByRole('option',{name:option,exact:true}).click();await page.keyboard.press('Escape');}
 await pick('选择机型','iPhone Duo');
@@ -86,6 +91,7 @@ assert.equal(await page.getByLabel('Bark 链接地址').inputValue(),'https://ap
 await page.keyboard.press('Escape');
 assert.equal(await page.getByLabel('Bark 链接地址').isVisible(),false,'Esc closes the settings modal');
 
+const callsBeforePlan=await page.evaluate(()=>window.__UI_CALLS__.length);
 await page.getByRole('button',{name:'方案设置',exact:true}).click();
 await page.getByRole('spinbutton',{name:'总预算（含保障）'}).fill('18000');
 await page.getByLabel('名字',{exact:true}).fill('演示');
@@ -95,7 +101,7 @@ await page.getByRole('button',{name:'方案设置',exact:true}).click();
 await screenshot(page,'plan-modal.png');
 assert.equal(await page.getByRole('spinbutton',{name:'总预算（含保障）'}).inputValue(),'18000');
 assert.equal(await page.getByLabel('名字',{exact:true}).inputValue(),'演示');
-assert.equal(await page.evaluate(()=>window.__UI_CALLS__.some(c=>c.cmd==='checkout_command'&&c.args.op!=='status')),false,'folding never reads profiles, saves, arms or submits');
+assert.equal(await page.evaluate(from=>window.__UI_CALLS__.slice(from).some(c=>c.cmd==='checkout_command'&&c.args.op!=='status'),callsBeforePlan),false,'folding never reads profiles, saves, arms or submits');
 await page.getByRole('button',{name:'全款',exact:true}).click();
 assert.equal(await page.getByLabel('全款渠道').isEnabled(),true);
 await page.getByLabel('全款渠道').selectOption('微信支付');
@@ -135,5 +141,5 @@ await page.getByText('从一个心仪的型号开始').waitFor();
 assert.equal(await page.getByRole('button',{name:'开始监测',exact:true}).isEnabled(),false);
 await screenshot(page,'empty.png',{fullPage:true});
 assert.deepEqual(errors,[]);
-console.log('UI preview passed: one-screen layout with checkout on top and logs docked at the bottom, both themes, 1280/1000 widths, target/Bark/contact/plan draft retention in modals, main actions and stop always on the page, one-click arming that also starts monitoring. Mocked IPC only; external requests blocked.');
+console.log('UI preview passed: one-screen layout with checkout on top and logs docked at the bottom, both themes, 1280/1000 widths, target/Bark/contact/plan draft retention in modals, main actions and stop always on the page, one-click arming that also starts monitoring, one-click row purchase. Mocked IPC only; external requests blocked.');
 }finally{await browser.close();server.close();}

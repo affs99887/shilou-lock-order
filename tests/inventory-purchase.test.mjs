@@ -53,14 +53,14 @@ test('preflight notices a checkout started after the button was drawn',async()=>
  await a.render().purchase(target);
  assert.equal(a.calls.filter(c=>c.op==='purchase').length,0);
 });
-test('formal row purchase retains explicit confirmation and cancellation sends nothing',async()=>{
+test('with auto-submit ticked a row purchase starts directly and carries the authorization',async()=>{
  const a=await setup({plan:{auto_submit_order:true}});
  await a.render().purchase(target);
- assert.deepEqual(a.render().confirmationTarget,target);
- assert.equal(a.calls.filter(c=>c.op==='purchase').length,0);
- a.render().cancel();assert.equal(a.render().confirmationTarget,null);
- await a.render().purchase(target);a.render().confirm();await settle();
- assert.equal(a.calls.find(c=>c.op==='purchase').payload.confirmSubmission,true);
+ assert.equal('confirmationTarget' in a.render(),false,'不再有确认弹窗');
+ const command=a.calls.find(c=>c.op==='purchase');
+ assert.equal(command.payload.targetKey,'zh_CN|R683|TEST');
+ assert.equal(command.payload.confirmSubmission,true);
+ assert.equal(a.calls.filter(c=>c.op==='purchase').length,1);
 });
 test('backend rejection is visible and the button becomes available again',async()=>{
  const a=await setup();a.intercept(async(args,status)=>{if(args.op==='purchase')throw Error('目标当前未确认有货');return status;});

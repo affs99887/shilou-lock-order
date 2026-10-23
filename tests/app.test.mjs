@@ -6,8 +6,8 @@ function renderApp() {
   const saved = [];
   const addedTargets = [];
   const purchaseRequests = [];
-  const purchase = { disabled: false, pending: false, confirmationTarget: null, error: "",
-    purchase: target => purchaseRequests.push(target), confirm() {}, cancel() {} };
+  const purchase = { disabled: false, pending: false, error: "",
+    purchase: target => purchaseRequests.push(target) };
   const pushSaves = [];
   const state = {
     settings: { locale: "zh_CN", barkUrl: "https://api.day.app/saved-key", intervalSeconds: 30 },
@@ -111,6 +111,8 @@ test("only in-stock rows offer manual purchase and disable it while checkout is 
   const button=()=>app.control(e=>e.type==="Button" && e.props.children==="立即选购");
   assert.equal(button().disabled,false);button().onClick();
   assert.deepEqual(app.purchaseRequests,[target]);
+  // 点了就直接开始，页面上没有任何确认弹窗。
+  assert.equal(app.all(e=>e.type==="Dialog").length,0);
   app.purchase.disabled=true;assert.equal(button().disabled,true);
   app.state.rows[0].availability={kind:"out_of_stock"};
   assert.equal(app.all(e=>e.type==="Button" && e.props.children==="立即选购").length,0);

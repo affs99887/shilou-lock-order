@@ -18,7 +18,6 @@ import { BarkSettings } from "@/components/BarkSettings";
 import { AutoCheckout } from "@/components/AutoCheckout";
 import { ConfigModal } from "@/components/ConfigModal";
 import { useInventoryPurchase } from "@/lib/inventory-purchase";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { MultiCombobox } from "@/components/MultiCombobox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -518,7 +517,7 @@ export default function App() {
                         <div className="flex items-center justify-end gap-2">
                         {row.availability.kind === "in_stock" && <Button size="sm"
                           disabled={purchase.disabled}
-                          title="按已保存的选购方案选购此商品；选购已启用或执行中时不可重复启动"
+                          title="按已保存的选购方案直接选购此商品，不弹窗确认；方案勾了「自动下单」时到核对页会自动下单。选购已启用或执行中时不可重复启动"
                           onClick={() => void purchase.purchase(row.target)}>立即选购</Button>}
                         <Button
                           variant="ghost"
@@ -541,18 +540,6 @@ export default function App() {
         </div>
 
         {purchase.error && <p role="alert" className="text-destructive">{purchase.error}</p>}
-        <Dialog open={purchase.confirmationTarget !== null} onOpenChange={open => { if (!open) purchase.cancel(); }}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>确认按此目标自动下单</DialogTitle>
-              <DialogDescription>{purchase.confirmationTarget?.productName} · {purchase.confirmationTarget?.storeTitle}。将按已保存的预算、取货和付款方案自动选购；到达订单核对页后点击「立即下单」创建真实订单。付款、授信和签约仍由本人完成。</DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              <Button variant="outline" disabled={purchase.pending} onClick={purchase.cancel}>取消</Button>
-              <Button disabled={purchase.pending} onClick={purchase.confirm}>确认选购并授权下单</Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
 
         <section id="query-logs" aria-labelledby="query-logs-title" className="query-logs shrink-0">
           <div className="logs-heading"><h2 id="query-logs-title">查询日志</h2><span>最新的在最下面，有货的行标绿</span></div>
